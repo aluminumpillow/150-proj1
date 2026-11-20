@@ -1,0 +1,315 @@
+include "common.kl";
+include "syntax.kl";
+
+
+letrec inArr elem arr =
+  match arr {
+  
+    [] => 
+      false;
+
+    f :: rest => 
+      if f == elem then true else inArr elem rest;
+    
+  };
+
+letrec allUnique records curr =
+  match records {
+    [] => 
+      true;
+
+    first :: rest =>
+      if inArr first.name curr then
+        false
+      else
+       allUnique rest (first.name :: curr);
+    
+    
+  };
+
+
+# typeEquals :: Type -> Type -> Bool
+letrec typeEquals left right =
+  match left, right {
+    NumberType, NumberType =>
+      true;
+
+    BoolType, BoolType =>
+      true;
+
+    StringType, StringType =>
+      true;
+
+    NullType, NullType =>
+      true;
+
+    FunctionType lParams lRet, FunctionType rParams rRet =>
+
+      if not (typeEquals lRet rRet) then
+        false
+      else
+        match lParams, rParams {
+            [], [] => 
+              true;
+            l1 :: lrest, r1 :: rrest => 
+              (typeEquals l1 r1)  && (typeEquals (FunctionType lrest lRet) (FunctionType rrest rRet));
+            _,_ =>
+              false;
+          };
+
+    RecordType lRecords, RecordType rRecords =>
+      match lRecords, rRecords {
+          [], [] => 
+            true;
+          l1 :: lrest, r1 :: rrest => 
+            (typeEquals l1.typ r1.typ)  && (typeEquals (RecordType lrest) (RecordType rrest));
+          _,_ =>
+            false;
+        };
+    _, _ =>
+      false;
+  };
+
+
+
+# emptyContext :: String -> Option Type
+let emptyScope =
+  fn name =>
+    None;
+
+# extendContext
+#   :: (String -> Option Type)
+#   -> String
+#   -> Type
+#   -> (String -> Option Type)
+let extendScope scope name typ =
+  fn query => 
+    if query == name then
+      Some typ
+    else
+     scope query;
+
+letrec addBindings scope bindings =
+  match bindings {
+    [] => scope;
+
+    first :: rest =>
+      addBindings (extendScope scope first.name first.typ) rest;
+    
+  };
+
+let pushScope typeEnv =
+  emptyScope :: typeEnv;
+
+# localScope ::= List (String -> Option Type) -> (String -> Option Type)
+let localScope typeEnv =
+  match typeEnv {
+    scope :: rest => scope;
+    [] => emptyScope;
+  };
+
+// then to query:
+# match (localScope typeEnv) name {
+#   Some _ => ...;  
+#   None => ...;
+# };
+
+let initialTypeEnv = [emptyScope];
+
+letrec lookup name typeEnv =
+  match typeEnv {
+    [] =>
+      Err (str_concat "unbound variable: " name);
+
+    scope :: rest =>
+      match scope name {
+        Some typ => Ok typ;
+        None => lookup name rest;
+      };
+  };
+
+let extractType resultType =
+  match {
+    Ok typ => typ;
+    Err err => err;
+  };
+
+# checkExpr    : Expr -> TypeEnv -> Result Type TypeError
+letrec checkExpr expr typeEnv =
+  // check for uniquness aswell of field names and paramters here before continuing. 
+
+  match expr {
+
+    NumberExpr _ =>
+      Ok NumberType;
+      
+    BoolExpr _ =>
+      Ok BoolType;
+    
+    StringExpr _ =>
+      Ok StringType;
+    
+    NullExpr =>
+      Ok NullType;
+
+    VarExpr name =>
+      lookup name typeEnv;
+
+    VarExpr name =>
+      lookup name typeEnv;
+
+    AssignExpr name e =>
+      match checkExpr e typeEnv {
+        Ok typExpr =>
+          match lookup name typeEnv {
+            Ok typVar =>
+              if typeEquals typVar typExpr then
+                Ok typVar
+              else
+                Err "assignment type mismatch";
+    
+            Err err =>
+              Err err;
+          };
+    
+        Err err =>
+          Err err;
+      };
+
+    UnaryOpExpr op e =>
+      match checkExpr e typeEnv {
+        Ok typ =>
+          match op, typ {
+            NegOp, NumberType => 
+              Ok NumberType;
+            NotOp, BoolType =>
+              Ok BoolType;
+            _,_ =>
+              Err "bad operand type for unary operator";
+              // maybe str_concat with what unary operator it erred on, just add more cases 
+          };
+
+        Err err => 
+          Err err;
+        
+      };
+
+    BinOpExpr op left right =>
+      let checkedLeft = checkExpr left typeEnv in
+      let checkedRight = checkExpr right typeEnv in
+
+      match checkedLeft, checkedRight {
+        Ok leftType, Ok rightType =>
+
+         match leftType, rightType {
+            NumberType, NumberType =>
+              match op {
+                AddOp => Ok NumberType;
+                SubOp => Ok NumberType;
+                MulOp => Ok NumberType;
+                DivOp => Ok NumberType;
+                LtOp => Ok BoolType; // T-Compare
+                LeOp => Ok BoolType; // T-Compare
+                GtOp => Ok BoolType; // T-Compare
+                GeOp => Ok BoolType; // T-Compare
+                EqOp => Ok BoolType; // T-Equal
+                NeqOp => Ok BoolType; // T-Equal
+                _ => Err "unsupported binary operator for operand types";
+              };
+            
+            StringType, StringType =>
+              match op {
+              // assume parser makes "+" concat for now
+              AddOp => Ok StringType;
+              EqOp => Ok BoolType; // T-Equal
+              NeqOp => Ok BoolType; // T-Equal
+              _ => Err "unsupported binary operator for operand types";
+              };
+              
+            BoolType, BoolType =>
+              match op {
+                AndOp => Ok BoolType;
+                OrOp => Ok BoolType;
+                EqOp => Ok BoolType; // T-Equal
+                NeqOp => Ok BoolType; // T-Equal
+                _ => Err "unsupported binary operator for operand types";
+              };
+              
+            NullType, NullType =>
+              match op {
+                EqOp => Ok BoolType; // T-Equal
+                NeqOp => Ok BoolType; // T-Equal
+                _ => Err "unsupported binary operator for operand types";
+              };
+
+            _,_ =>
+              Err "bad operand types for binary operator";
+             
+         };
+          
+        Err err, _ => Err err;
+        _, Err err => Err err;
+        
+      };
+
+    FnExpr params returnType body =>
+      // uniqueness check
+      if not (allUnique params []) then
+        Err "duplicate parameter names"
+      else
+        let newScope = addBindings emptyScope params in
+        let newEnv = newScope :: typeEnv in
+
+        match checkExpr body newEnv {
+          Ok returnBodyType =>
+            if typeEquals returnType returnBodyType then
+              Ok (FunctionType (map (fn x => x.typ)  params) returnType)
+            else
+              Err "annotated return type does not match resulting expression type";
+          Err err => Err err;
+        };
+        
+    AppExpr function arguments =>
+      match checkExpr function typeEnv {
+        Ok typ =>
+          match typ {
+            FunctionType paramTypes returnType =>
+
+              if length paramTypes != length arguments then
+                Err "number of arguments do not equal number of parameters"
+              else 
+                // if Ok Type, need to extract Type, else if any Err exists, return new Err
+                let argResult = map (fn arg => extractType (checkExpr arg typeEnv)) arguments in
+                let fn 
+
+                // little hack just to use typeEquals
+                if typeEquals (FunctionType paramTypes returnType) (FunctionType paramTypes returnType) then
+                  Ok returnType
+                else
+                  Err "argument types do not match paramter types";  
+
+            _ =>
+              Err "application is done on non-function type";
+          };
+        Err err => Err err;
+    };
+
+    RecordExpr records =>
+      if not (allUnique records []) then
+        Err "duplicate record names"
+      else
+        let fieldValues = map (fn record => record.expr) records in
+        let valueTypes = map (fn value => checkExpr value typeEnv) fieldValues in
+          
+          
+    _ => Err "invalid constructor type"; 
+  };
+
+# checkStmt    : Stmt -> TypeEnv -> Result TypeEnv TypeError
+# letrec checkStmt stmt typeEnv =
+#   match stmt {
+    
+    
+#   };
+
+let main = pureIO unit;
