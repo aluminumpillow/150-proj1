@@ -28,3 +28,45 @@ letrec length xs =
     _ :: rest =>
       1 + length rest;
   };
+
+letrec foldLeft combine initial xs =
+  match xs {
+    [] =>
+      initial;
+
+    x :: rest =>
+      foldLeft combine (combine initial x) rest;
+  };
+
+let joinComma parts =
+  letrec join xs =
+    match xs {
+      [] => "";
+      first :: [] => first;
+      first :: rest => str_concat first (str_concat ", " (join rest));
+    }
+  in join parts;
+
+letrec showType typ =
+  match typ {
+    NumberType => "number";
+    BoolType => "boolean";
+    StringType => "string";
+    NullType => "null";
+
+    FunctionType params ret =>
+      let paramText = joinComma (map showType params) in
+      str_concat "(" (str_concat paramText (str_concat ") -> " (showType ret)));
+
+    RecordType fields =>
+      let showField = fn field =>
+        str_concat field.name (str_concat ": " (showType field.typ))
+      in
+      str_concat "{" (str_concat (joinComma (map showField fields)) "}");
+  };
+
+let typeMismatch expected actual =
+  let expectedText = str_concat "expected " (showType expected) in
+  let actualText = str_concat ", got " (showType actual) in
+  str_concat expectedText actualText;
+

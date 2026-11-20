@@ -22,55 +22,8 @@ letrec allUnique records curr =
       if inArr first.name curr then
         false
       else
-       allUnique rest (first.name :: curr);
-    
-    
+       allUnique rest (first.name :: curr); 
   };
-
-
-# typeEquals :: Type -> Type -> Bool
-letrec typeEquals left right =
-  match left, right {
-    NumberType, NumberType =>
-      true;
-
-    BoolType, BoolType =>
-      true;
-
-    StringType, StringType =>
-      true;
-
-    NullType, NullType =>
-      true;
-
-    FunctionType lParams lRet, FunctionType rParams rRet =>
-
-      if not (typeEquals lRet rRet) then
-        false
-      else
-        match lParams, rParams {
-            [], [] => 
-              true;
-            l1 :: lrest, r1 :: rrest => 
-              (typeEquals l1 r1)  && (typeEquals (FunctionType lrest lRet) (FunctionType rrest rRet));
-            _,_ =>
-              false;
-          };
-
-    RecordType lRecords, RecordType rRecords =>
-      match lRecords, rRecords {
-          [], [] => 
-            true;
-          l1 :: lrest, r1 :: rrest => 
-            (typeEquals l1.typ r1.typ)  && (typeEquals (RecordType lrest) (RecordType rrest));
-          _,_ =>
-            false;
-        };
-    _, _ =>
-      false;
-  };
-
-
 
 # emptyContext :: String -> Option Type
 let emptyScope =
@@ -97,6 +50,58 @@ letrec addBindings scope bindings =
       addBindings (extendScope scope first.name first.typ) rest;
     
   };
+
+# typeEquals :: Type -> Type -> Bool
+letrec typeEquals left right =
+  match left, right {
+    NumberType, NumberType =>
+      true;
+
+    BoolType, BoolType =>
+      true;
+
+    StringType, StringType =>
+      true;
+
+    NullType, NullType =>
+      true;
+
+    FunctionType lParams lRet, FunctionType rParams rRet =>
+      letrec paramsMatch left right =
+        match left, right {
+          [], [] => true;
+    
+          lParam :: lRest, rParam :: rRest =>
+            (typeEquals lParam rParam) && (paramsMatch lRest rRest);
+    
+          _, _ => false;
+        }
+      in
+        (typeEquals lRet rRet) && (paramsMatch lParams rParams);
+
+    RecordType lRecord, RecordType rRecord =>
+      if length lRecord != length rRecord then
+        false
+      else
+        let rightScope = addBindings emptyScope rRecord in
+        letrec fieldsMatch fields =
+          match fields {
+            [] => true;
+    
+            field :: rest =>
+              match rightScope field.name {
+                None => false;
+                Some rightType =>
+                  (typeEquals field.typ rightType) && (fieldsMatch rest);
+              };
+          }
+        in 
+          fieldsMatch lRecord;
+        
+    _, _ =>
+      false;
+  };
+
 
 let pushScope typeEnv =
   emptyScope :: typeEnv;
@@ -128,11 +133,6 @@ letrec lookup name typeEnv =
       };
   };
 
-let extractType resultType =
-  match {
-    Ok typ => typ;
-    Err err => err;
-  };
 
 # checkExpr    : Expr -> TypeEnv -> Result Type TypeError
 letrec checkExpr expr typeEnv =
@@ -200,14 +200,14 @@ letrec checkExpr expr typeEnv =
 
       match checkedLeft, checkedRight {
         Ok leftType, Ok rightType =>
-
-         match leftType, rightType {
+        
+          match leftType, rightType {
             NumberType, NumberType =>
               match op {
-                AddOp => Ok NumberType;
-                SubOp => Ok NumberType;
-                MulOp => Ok NumberType;
-                DivOp => Ok NumberType;
+                AddOp => Ok NumberType; // T-Arith
+                SubOp => Ok NumberType; // T-Arith
+                MulOp => Ok NumberType; // T-Arith
+                DivOp => Ok NumberType; // T-Arith
                 LtOp => Ok BoolType; // T-Compare
                 LeOp => Ok BoolType; // T-Compare
                 GtOp => Ok BoolType; // T-Compare
@@ -220,7 +220,7 @@ letrec checkExpr expr typeEnv =
             StringType, StringType =>
               match op {
               // assume parser makes "+" concat for now
-              AddOp => Ok StringType;
+              AddOp => Ok StringType; // T-Concat
               EqOp => Ok BoolType; // T-Equal
               NeqOp => Ok BoolType; // T-Equal
               _ => Err "unsupported binary operator for operand types";
@@ -228,8 +228,8 @@ letrec checkExpr expr typeEnv =
               
             BoolType, BoolType =>
               match op {
-                AndOp => Ok BoolType;
-                OrOp => Ok BoolType;
+                AndOp => Ok BoolType; // T-Logic
+                OrOp => Ok BoolType; // T-Logic
                 EqOp => Ok BoolType; // T-Equal
                 NeqOp => Ok BoolType; // T-Equal
                 _ => Err "unsupported binary operator for operand types";
@@ -261,11 +261,11 @@ letrec checkExpr expr typeEnv =
         let newEnv = newScope :: typeEnv in
 
         match checkExpr body newEnv {
-          Ok returnBodyType =>
-            if typeEquals returnType returnBodyType then
+          Ok actualBodyType =>
+            if typeEquals returnType actualBodyType then
               Ok (FunctionType (map (fn x => x.typ)  params) returnType)
             else
-              Err "annotated return type does not match resulting expression type";
+              Err (typeMismatch returnType actualBodyType);
           Err err => Err err;
         };
         
@@ -288,28 +288,69 @@ letrec checkExpr expr typeEnv =
                     if typeEquals actual expected then
                       checkArgs restArgs restParams
                     else
-                      Err "argument type mismatch"; 
+                      Err (typeMismatch expected actual); 
                 };
     
               _, _ => Err arityError;
             }
           in
-          if length arguments != length paramTypes then
-            Err arityError
-          else
-            checkArgs arguments paramTypes;
-    
+            if length arguments != length paramTypes then
+              Err arityError
+            else
+              checkArgs arguments paramTypes;
+      
         Ok _ => Err "application requires a function";
       };
 
-    RecordExpr records =>
-      if not (allUnique records []) then
-        Err "duplicate record names"
+    RecordExpr fields =>
+      if not (allUnique fields []) then
+        Err "duplicate record field names"
       else
-        let fieldValues = map (fn record => record.expr) records in
-        let valueTypes = map (fn value => checkExpr value typeEnv) fieldValues in
-          
-          
+        letrec getTypedFields fields =
+          match fields {
+            [] => Ok [];
+
+            field :: rest =>
+              match checkExpr field.expr typeEnv {
+                Ok typ =>
+                  match getTypedFields rest {
+                    Ok typedRest =>
+                      Ok ({name = field.name, typ = typ} :: typedRest);
+                    Err err => 
+                      Err err;
+                      
+                  };
+                Err err => Err err; 
+              };
+          } in 
+          match getTypedFields fields {
+            Ok typedFields => Ok (RecordType typedFields);
+            Err err => Err err; 
+          };
+
+    FieldExpr expr targetFieldName =>
+      match checkExpr expr typeEnv {
+        Ok (RecordType typedFields) =>
+          letrec findField fields =
+            match fields {
+              [] =>
+                Err (str_concat "record has no field named " targetFieldName);
+    
+              field :: rest =>
+                if field.name == targetFieldName then
+                  Ok field.typ
+                else
+                  findField rest;
+            }
+          in findField typedFields;
+    
+        Ok _ =>
+          Err "accessing field on a non-record";
+    
+        Err err =>
+          Err err;
+      };
+    
     _ => Err "invalid constructor type"; 
   };
 
