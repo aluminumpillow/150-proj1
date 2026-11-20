@@ -1,0 +1,49 @@
+type Result t e   
+  = Ok t          
+  | Err e; 
+
+
+type Type
+  = NumberType
+  | BoolType
+  | StringType
+  | NullType
+  | FunctionType [Type] Type
+  | RecordType [{name: String, typ: Type}];
+
+type alias Scope = String -> (Option Type);
+
+type TypeEnv = List (Scope);
+
+type UnaryOp
+  = NegOp
+  | NotOp;
+
+type BinOp
+  = AddOp
+  | SubOp
+  | MulOp
+  | DivOp
+  | EqOp
+  | NeqOp
+  | LtOp
+  | LeOp
+  | GtOp
+  | GeOp
+  | AndOp
+  | OrOp;
+
+
+type Expr
+  = NumberExpr Float
+  | BoolExpr Bool
+  | StringExpr String
+  | NullExpr
+  | VarExpr String
+  | AssignExpr String Expr
+  | UnaryOpExpr UnaryOp Expr
+  | BinOpExpr BinOp Expr Expr
+  | FnExpr [{ name: String, typ: Type }] Type Expr
+  | AppExpr Expr [Expr]
+  | RecordExpr [{ name: String, expr: Expr }]
+  | FieldExpr Expr String;
