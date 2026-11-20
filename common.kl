@@ -1,0 +1,30 @@
+let assert (label: String) (condition: Bool): IO Unit =
+  if condition then
+    pureIO unit
+  else
+    do (bindIO) {
+      outputLnIO (str_concat "❌ FAIL: " label);
+      exit 1
+    };
+
+
+# not :: Bool -> Bool
+let not b =
+  if b then false else true;
+
+
+letrec map f xs =
+  match xs {
+    [] =>
+      [];
+    x :: rest =>
+      f x :: map f rest;
+  };
+  
+letrec length xs =
+  match xs {
+    [] =>
+      0;
+    _ :: rest =>
+      1 + length rest;
+  };
