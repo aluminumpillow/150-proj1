@@ -1,0 +1,9 @@
+type Binding = Binding String Int;
+
+type Value
+    = NumberVal Float
+    | BoolVal Bool
+    | StringVal String
+    | NullVal
+    | RecordVal [{name: String, value: Value}]
+    | ClosureVal [String] Expr [[Binding]];
