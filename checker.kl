@@ -271,28 +271,36 @@ letrec checkExpr expr typeEnv =
         
     AppExpr function arguments =>
       match checkExpr function typeEnv {
-        Ok typ =>
-          match typ {
-            FunctionType paramTypes returnType =>
-
-              if length paramTypes != length arguments then
-                Err "number of arguments do not equal number of parameters"
-              else 
-                // if Ok Type, need to extract Type, else if any Err exists, return new Err
-                let argResult = map (fn arg => extractType (checkExpr arg typeEnv)) arguments in
-                let fn 
-
-                // little hack just to use typeEquals
-                if typeEquals (FunctionType paramTypes returnType) (FunctionType paramTypes returnType) then
-                  Ok returnType
-                else
-                  Err "argument types do not match paramter types";  
-
-            _ =>
-              Err "application is done on non-function type";
-          };
         Err err => Err err;
-    };
+    
+        Ok (FunctionType paramTypes returnType) =>
+          let arityError = "number of arguments does not match number of parameters" in
+          letrec checkArgs args params =
+            match args, params {
+              [], [] =>
+                Ok returnType;
+    
+              arg :: restArgs, expected :: restParams =>
+                match checkExpr arg typeEnv {
+                  Err err => Err err;
+    
+                  Ok actual =>
+                    if typeEquals actual expected then
+                      checkArgs restArgs restParams
+                    else
+                      Err "argument type mismatch"; 
+                };
+    
+              _, _ => Err arityError;
+            }
+          in
+          if length arguments != length paramTypes then
+            Err arityError
+          else
+            checkArgs arguments paramTypes;
+    
+        Ok _ => Err "application requires a function";
+      };
 
     RecordExpr records =>
       if not (allUnique records []) then
