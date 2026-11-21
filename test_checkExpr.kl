@@ -1,0 +1,734 @@
+# Included by test_checker.kl after test_helper.kl.
+
+let testNumberExpr: IO Unit =
+  do (bindIO) {
+    assertExpr "NumberExpr: zero" (NumberExpr 0.0) [] (Ok NumberType);
+    assertExpr "NumberExpr: positive" (NumberExpr 42.0) [] (Ok NumberType);
+    assertExpr "NumberExpr: negative" (NumberExpr (-42.0)) [] (Ok NumberType);
+    assertExpr "NumberExpr: fraction" (NumberExpr 0.125) [] (Ok NumberType);
+    assertExpr "NumberExpr: negative fraction" (NumberExpr (-0.125)) [] (Ok NumberType);
+    assertExpr "NumberExpr: large value" (NumberExpr 1000000000.0) [] (Ok NumberType);
+    assertExpr "NumberExpr: ignores unrelated bindings" (NumberExpr 1.0) sampleEnv (Ok NumberType)
+  };
+
+let testBoolExpr: IO Unit =
+  do (bindIO) {
+    assertExpr "BoolExpr: true" (BoolExpr true) [] (Ok BoolType);
+    assertExpr "BoolExpr: false" (BoolExpr false) [] (Ok BoolType);
+    assertExpr "BoolExpr: ignores unrelated bindings" (BoolExpr false) sampleEnv (Ok BoolType)
+  };
+
+let testStringExpr: IO Unit =
+  do (bindIO) {
+    assertExpr "StringExpr: empty" (StringExpr "") [] (Ok StringType);
+    assertExpr "StringExpr: ordinary text" (StringExpr "hello") [] (Ok StringType);
+    assertExpr "StringExpr: whitespace and escapes" (StringExpr " \t\n\"quoted\"") [] (Ok StringType);
+    assertExpr "StringExpr: Unicode" (StringExpr "hello 世界") [] (Ok StringType);
+    assertExpr "StringExpr: ignores unrelated bindings" (StringExpr "x") sampleEnv (Ok StringType)
+  };
+
+let testNullExpr: IO Unit =
+  do (bindIO) {
+    assertExpr "NullExpr: empty environment" NullExpr [] (Ok NullType);
+    assertExpr "NullExpr: populated environment" NullExpr sampleEnv (Ok NullType)
+  };
+
+let testVarExpr: IO Unit =
+  do (bindIO) {
+    forEachTest (fn binding =>
+      assertExpr (str_concat "VarExpr: retrieves " binding.name)
+        (VarExpr binding.name) sampleEnv (Ok binding.typ)
+    ) sampleBindings;
+    assertExpr "VarExpr: empty environment" (VarExpr "x") [] (Err "unbound variable: x");
+    assertExpr "VarExpr: initial environment" (VarExpr "x") initialTypeEnv (Err "unbound variable: x");
+    assertExpr "VarExpr: inner binding shadows outer binding"
+      (VarExpr "x") [scope3, scope1] (Ok BoolType);
+    assertExpr "VarExpr: looks through empty scopes"
+      (VarExpr "x") [emptyScope, emptyScope, scope1] (Ok NumberType);
+    assertExpr "VarExpr: looks through unrelated local bindings"
+      (VarExpr "flag") [scope1, scope2] (Ok BoolType);
+    assertExpr "VarExpr: missing in populated environment"
+      (VarExpr "missing") sampleEnv (Err "unbound variable: missing");
+    assertExpr "VarExpr: case-sensitive name"
+      (VarExpr "Number") sampleEnv (Err "unbound variable: Number")
+  };
+
+let testAssignExpr: IO Unit =
+  do (bindIO) {
+    forEachTest (fn sample =>
+      assertExpr (str_concat "AssignExpr: matching " sample.label)
+        (AssignExpr sample.label sample.expr) sampleEnv (Ok sample.typ)
+    ) exprSamples;
+    # Reject every pair of different type constructors, in both directions.
+    forEachTest (fn target =>
+      forEachTest (fn value =>
+        if target.label == value.label then
+          pureIO unit
+        else
+          assertExpr (str_concat "AssignExpr: "
+            (str_concat value.label (str_concat " into " target.label)))
+            (AssignExpr target.label value.expr) sampleEnv (Err "assignment type mismatch")
+      ) exprSamples
+    ) exprSamples;
+    assertExpr "AssignExpr: finds an outer binding"
+      (AssignExpr "x" (NumberExpr 2.0)) [emptyScope, scope1] (Ok NumberType);
+    assertExpr "AssignExpr: uses the innermost binding"
+      (AssignExpr "x" (BoolExpr false)) [scope3, scope1] (Ok BoolType);
+    assertExpr "AssignExpr: cannot bypass a shadowing binding"
+      (AssignExpr "x" (NumberExpr 2.0)) [scope3, scope1] (Err "assignment type mismatch");
+    assertExpr "AssignExpr: unbound target"
+      (AssignExpr "missing" (NumberExpr 1.0)) sampleEnv (Err "unbound variable: missing");
+    assertExpr "AssignExpr: RHS error propagates"
+      (AssignExpr "number" (VarExpr "missingRhs")) sampleEnv (Err "unbound variable: missingRhs");
+    assertExpr "AssignExpr: RHS error precedes missing target"
+      (AssignExpr "missingTarget" (VarExpr "missingRhs")) [] (Err "unbound variable: missingRhs");
+    assertExpr "AssignExpr: nested assignments return their assigned type"
+      (AssignExpr "number" (AssignExpr "number" (NumberExpr 2.0))) sampleEnv (Ok NumberType);
+    assertExpr "AssignExpr: nested assignment error propagates"
+      (AssignExpr "number" (AssignExpr "boolean" (NumberExpr 2.0))) sampleEnv
+      (Err "assignment type mismatch");
+    assertExpr "AssignExpr: reordered record fields match and return the target type"
+      (AssignExpr "record" (RecordExpr [
+        {name = "active", expr = BoolExpr false},
+        {name = "count", expr = NumberExpr 2.0}
+      ])) sampleEnv
+      (Ok (RecordType [{name = "count", typ = NumberType}, {name = "active", typ = BoolType}]));
+    assertExpr "AssignExpr: record field type differs"
+      (AssignExpr "record" (RecordExpr [
+        {name = "count", expr = StringExpr "wrong"},
+        {name = "active", expr = BoolExpr true}
+      ])) sampleEnv (Err "assignment type mismatch");
+    assertExpr "AssignExpr: record is missing a field"
+      (AssignExpr "record" (RecordExpr [{name = "count", expr = NumberExpr 1.0}]))
+      sampleEnv (Err "assignment type mismatch");
+    assertExpr "AssignExpr: record has an extra field"
+      (AssignExpr "record" (RecordExpr [
+        {name = "count", expr = NumberExpr 1.0},
+        {name = "active", expr = BoolExpr true},
+        {name = "extra", expr = NullExpr}
+      ])) sampleEnv (Err "assignment type mismatch");
+    assertExpr "AssignExpr: function parameter type differs"
+      (AssignExpr "function" (FnExpr
+        [{name = "n", typ = BoolType}, {name = "text", typ = StringType}]
+        BoolType (BoolExpr true))) sampleEnv (Err "assignment type mismatch");
+    assertExpr "AssignExpr: function return type differs"
+      (AssignExpr "function" (FnExpr
+        [{name = "n", typ = NumberType}, {name = "text", typ = StringType}]
+        NumberType (NumberExpr 1.0))) sampleEnv (Err "assignment type mismatch");
+    assertExpr "AssignExpr: function arity differs"
+      (AssignExpr "function" (FnExpr [] BoolType (BoolExpr true)))
+      sampleEnv (Err "assignment type mismatch");
+    assertExpr "AssignExpr: invalid RHS is rejected before comparing types"
+      (AssignExpr "string" (UnaryOpExpr NegOp (BoolExpr true))) sampleEnv
+      (Err "bad operand type for unary operator")
+  };
+
+let testUnaryOpExpr: IO Unit =
+  do (bindIO) {
+    assertExpr "UnaryOpExpr: negate a number"
+      (UnaryOpExpr NegOp (NumberExpr 1.0)) [] (Ok NumberType);
+    assertExpr "UnaryOpExpr: negate zero"
+      (UnaryOpExpr NegOp (NumberExpr 0.0)) [] (Ok NumberType);
+    assertExpr "UnaryOpExpr: negate a negative number"
+      (UnaryOpExpr NegOp (NumberExpr (-1.0))) [] (Ok NumberType);
+    assertExpr "UnaryOpExpr: not true"
+      (UnaryOpExpr NotOp (BoolExpr true)) [] (Ok BoolType);
+    assertExpr "UnaryOpExpr: not false"
+      (UnaryOpExpr NotOp (BoolExpr false)) [] (Ok BoolType);
+    forEachTest (fn sample =>
+      do (bindIO) {
+        if sample.label == "number" then pureIO unit else
+          assertExpr (str_concat "UnaryOpExpr: negation rejects " sample.label)
+            (UnaryOpExpr NegOp sample.expr) [] (Err "bad operand type for unary operator");
+        if sample.label == "boolean" then pureIO unit else
+          assertExpr (str_concat "UnaryOpExpr: not rejects " sample.label)
+            (UnaryOpExpr NotOp sample.expr) [] (Err "bad operand type for unary operator")
+      }
+    ) exprSamples;
+    assertExpr "UnaryOpExpr: nested negation"
+      (UnaryOpExpr NegOp (UnaryOpExpr NegOp (NumberExpr 1.0))) [] (Ok NumberType);
+    assertExpr "UnaryOpExpr: nested not"
+      (UnaryOpExpr NotOp (UnaryOpExpr NotOp (BoolExpr false))) [] (Ok BoolType);
+    assertExpr "UnaryOpExpr: operand comes from the environment"
+      (UnaryOpExpr NegOp (VarExpr "number")) sampleEnv (Ok NumberType);
+    assertExpr "UnaryOpExpr: negation propagates operand error"
+      (UnaryOpExpr NegOp (VarExpr "missing")) [] (Err "unbound variable: missing");
+    assertExpr "UnaryOpExpr: not propagates operand error"
+      (UnaryOpExpr NotOp (VarExpr "missing")) [] (Err "unbound variable: missing");
+    assertExpr "UnaryOpExpr: nested operand error propagates"
+      (UnaryOpExpr NegOp (UnaryOpExpr NotOp (NumberExpr 1.0))) []
+      (Err "bad operand type for unary operator")
+  };
+
+# Expectation tables below use this exact operator order.
+let binaryOperators = [
+  {label = "+", op = AddOp},
+  {label = "-", op = SubOp},
+  {label = "*", op = MulOp},
+  {label = "/", op = DivOp},
+  {label = "<", op = LtOp},
+  {label = "<=", op = LeOp},
+  {label = ">", op = GtOp},
+  {label = ">=", op = GeOp},
+  {label = "==", op = EqOp},
+  {label = "!=", op = NeqOp},
+  {label = "&&", op = AndOp},
+  {label = "||", op = OrOp}
+];
+
+let assertBinaryResults label left right expectedResults =
+  letrec checkOperators operators expected =
+    match operators, expected {
+      [], [] => pureIO unit;
+      operator :: restOperators, result :: restResults =>
+        do (bindIO) {
+          assertExpr (str_concat label (str_concat " " operator.label))
+            (BinOpExpr operator.op left right) [] result;
+          checkOperators restOperators restResults
+        };
+      _, _ => assert "binary expectation table must cover every operator" false;
+    }
+  in checkOperators binaryOperators expectedResults;
+
+let testNumericBinOpExpr: IO Unit =
+  let unsupported = Err "unsupported binary operator for operand types" in
+  do (bindIO) {
+    assertBinaryResults "BinOpExpr: numbers" (NumberExpr 2.0) (NumberExpr 1.0) [
+      Ok NumberType, Ok NumberType, Ok NumberType, Ok NumberType,
+      Ok BoolType, Ok BoolType, Ok BoolType, Ok BoolType,
+      Ok BoolType, Ok BoolType, unsupported, unsupported
+    ];
+    assertExpr "BinOpExpr: division by zero is still well typed"
+      (BinOpExpr DivOp (NumberExpr 1.0) (NumberExpr 0.0)) [] (Ok NumberType);
+    assertExpr "BinOpExpr: nested arithmetic"
+      (BinOpExpr AddOp
+        (BinOpExpr MulOp (NumberExpr (-2.0)) (NumberExpr 3.0))
+        (BinOpExpr SubOp (NumberExpr 4.0) (NumberExpr 0.5))) [] (Ok NumberType);
+    assertExpr "BinOpExpr: numeric variables"
+      (BinOpExpr LtOp (VarExpr "number") (NumberExpr 0.0)) sampleEnv (Ok BoolType)
+  };
+
+let testStringBinOpExpr: IO Unit =
+  let unsupported = Err "unsupported binary operator for operand types" in
+  do (bindIO) {
+    assertBinaryResults "BinOpExpr: strings" (StringExpr "a") (StringExpr "b") [
+      Ok StringType, unsupported, unsupported, unsupported,
+      unsupported, unsupported, unsupported, unsupported,
+      Ok BoolType, Ok BoolType, unsupported, unsupported
+    ];
+    assertExpr "BinOpExpr: empty string concatenation"
+      (BinOpExpr AddOp (StringExpr "") (StringExpr "")) [] (Ok StringType);
+    assertExpr "BinOpExpr: nested string concatenation"
+      (BinOpExpr AddOp (StringExpr "a")
+        (BinOpExpr AddOp (StringExpr "b") (StringExpr "c"))) [] (Ok StringType)
+  };
+
+let testBoolBinOpExpr: IO Unit =
+  let unsupported = Err "unsupported binary operator for operand types" in
+  do (bindIO) {
+    assertBinaryResults "BinOpExpr: booleans" (BoolExpr true) (BoolExpr false) [
+      unsupported, unsupported, unsupported, unsupported,
+      unsupported, unsupported, unsupported, unsupported,
+      Ok BoolType, Ok BoolType, Ok BoolType, Ok BoolType
+    ];
+    assertExpr "BinOpExpr: nested comparisons and logic"
+      (BinOpExpr AndOp
+        (BinOpExpr LtOp (NumberExpr 1.0) (NumberExpr 2.0))
+        (BinOpExpr OrOp (BoolExpr false) (BoolExpr true))) [] (Ok BoolType)
+  };
+
+let testNullBinOpExpr: IO Unit =
+  let unsupported = Err "unsupported binary operator for operand types" in
+  assertBinaryResults "BinOpExpr: nulls" NullExpr NullExpr [
+    unsupported, unsupported, unsupported, unsupported,
+    unsupported, unsupported, unsupported, unsupported,
+    Ok BoolType, Ok BoolType, unsupported, unsupported
+  ];
+
+let testInvalidBinOpExpr: IO Unit =
+  # All 12 operators on all 36 ordered type pairs. The four same-primitive
+  # pairs are covered above; all other pairs, including record/record and
+  # function/function, must produce an operand-type error.
+  forEachTest (fn left =>
+    forEachTest (fn right =>
+      if left.label == right.label &&
+        not (left.label == "function" || left.label == "record") then
+        pureIO unit
+      else
+        forEachTest (fn operator =>
+          assertExpr (str_concat "BinOpExpr: rejects "
+            (str_concat left.label (str_concat " "
+              (str_concat operator.label (str_concat " " right.label)))))
+            (BinOpExpr operator.op left.expr right.expr) []
+            (Err "bad operand types for binary operator")
+        ) binaryOperators
+    ) exprSamples
+  ) exprSamples;
+
+let testBinOpErrors: IO Unit =
+  do (bindIO) {
+    forEachTest (fn operator =>
+      do (bindIO) {
+        assertExpr (str_concat "BinOpExpr: left error for " operator.label)
+          (BinOpExpr operator.op (VarExpr "leftMissing") (NumberExpr 1.0)) []
+          (Err "unbound variable: leftMissing");
+        assertExpr (str_concat "BinOpExpr: right error for " operator.label)
+          (BinOpExpr operator.op (NumberExpr 1.0) (VarExpr "rightMissing")) []
+          (Err "unbound variable: rightMissing");
+        assertExpr (str_concat "BinOpExpr: left error wins for " operator.label)
+          (BinOpExpr operator.op (VarExpr "leftMissing") (VarExpr "rightMissing")) []
+          (Err "unbound variable: leftMissing")
+      }
+    ) binaryOperators;
+    assertExpr "BinOpExpr: false && still checks the right operand"
+      (BinOpExpr AndOp (BoolExpr false) (VarExpr "missing")) [] (Err "unbound variable: missing");
+    assertExpr "BinOpExpr: true || still checks the right operand"
+      (BinOpExpr OrOp (BoolExpr true) (VarExpr "missing")) [] (Err "unbound variable: missing");
+    assertExpr "BinOpExpr: right error precedes operand compatibility"
+      (BinOpExpr AddOp NullExpr (VarExpr "missing")) [] (Err "unbound variable: missing");
+    assertExpr "BinOpExpr: nested error propagates"
+      (BinOpExpr AddOp (NumberExpr 1.0)
+        (UnaryOpExpr NegOp (BoolExpr true))) [] (Err "bad operand type for unary operator")
+  };
+
+let testBinOpExpr: IO Unit =
+  do (bindIO) {
+    testNumericBinOpExpr;
+    testStringBinOpExpr;
+    testBoolBinOpExpr;
+    testNullBinOpExpr;
+    testInvalidBinOpExpr;
+    testBinOpErrors
+  };
+
+let testFnTypeValidation: IO Unit =
+  do (bindIO) {
+    forEachTest (fn sample =>
+      do (bindIO) {
+        assertExpr (str_concat "FnExpr validation: unused parameter with " sample.label)
+          (FnExpr [{name = "unused", typ = sample.typ}] NullType NullExpr) []
+          (Err "duplicate record field names");
+        assertExpr (str_concat "FnExpr validation: later parameter with " sample.label)
+          (FnExpr [
+            {name = "ok", typ = NumberType}, {name = "bad", typ = sample.typ}
+          ] NullType NullExpr) [] (Err "duplicate record field names");
+        assertExpr (str_concat "FnExpr validation: return annotation with " sample.label)
+          (FnExpr [] sample.typ NullExpr) [] (Err "duplicate record field names");
+        assertExpr (str_concat "FnExpr validation: invalid annotation before body error, " sample.label)
+          (FnExpr [{name = "bad", typ = sample.typ}] NumberType (VarExpr "missingBody")) []
+          (Err "duplicate record field names")
+      }
+    ) nestedMalformedTypes;
+    assertExpr "FnExpr validation: duplicate parameter names precede annotation validation"
+      (FnExpr [
+        {name = "same", typ = malformedRecordType}, {name = "same", typ = NumberType}
+      ] NullType NullExpr) [] (Err "duplicate parameter names");
+    assertExpr "FnExpr validation: invalid return annotation precedes body error"
+      (FnExpr [] malformedRecordType (VarExpr "missingBody")) []
+      (Err "duplicate record field names")
+  };
+
+let testFnExpr: IO Unit =
+  do (bindIO) {
+    testFnTypeValidation;
+    forEachTest (fn sample =>
+      do (bindIO) {
+        assertExpr (str_concat "FnExpr: zero parameters returning " sample.label)
+          (FnExpr [] sample.typ sample.expr) [] (Ok (FunctionType [] sample.typ));
+        assertExpr (str_concat "FnExpr: identity parameter of type " sample.label)
+          (FnExpr [{name = "value", typ = sample.typ}] sample.typ (VarExpr "value")) []
+          (Ok (FunctionType [sample.typ] sample.typ))
+      }
+    ) exprSamples;
+    assertExpr "FnExpr: preserves parameter order"
+      (FnExpr [{name = "n", typ = NumberType}, {name = "flag", typ = BoolType}]
+        BoolType (VarExpr "flag")) [] (Ok (FunctionType [NumberType, BoolType] BoolType));
+    assertExpr "FnExpr: captures an outer variable"
+      (FnExpr [] NumberType (VarExpr "number")) sampleEnv (Ok (FunctionType [] NumberType));
+    assertExpr "FnExpr: parameters shadow outer variables"
+      (FnExpr [{name = "number", typ = StringType}] StringType (VarExpr "number")) sampleEnv
+      (Ok (FunctionType [StringType] StringType));
+    assertExpr "FnExpr: unrelated outer bindings remain visible"
+      (FnExpr [{name = "value", typ = StringType}] NumberType (VarExpr "number")) sampleEnv
+      (Ok (FunctionType [StringType] NumberType));
+    assertExpr "FnExpr: nested function captures an enclosing parameter"
+      (FnExpr [{name = "x", typ = NumberType}] (FunctionType [] NumberType)
+        (FnExpr [] NumberType (VarExpr "x"))) []
+      (Ok (FunctionType [NumberType] (FunctionType [] NumberType)));
+    assertExpr "FnExpr: nested parameter shadows enclosing parameter"
+      (FnExpr [{name = "x", typ = NumberType}] (FunctionType [BoolType] BoolType)
+        (FnExpr [{name = "x", typ = BoolType}] BoolType (VarExpr "x"))) []
+      (Ok (FunctionType [NumberType] (FunctionType [BoolType] BoolType)));
+    assertExpr "FnExpr: case-sensitive parameter names are distinct"
+      (FnExpr [{name = "x", typ = NumberType}, {name = "X", typ = BoolType}]
+        BoolType (VarExpr "X")) [] (Ok (FunctionType [NumberType, BoolType] BoolType));
+    assertExpr "FnExpr: duplicate parameter with the same type"
+      (FnExpr [{name = "x", typ = NumberType}, {name = "x", typ = NumberType}]
+        NumberType (VarExpr "x")) [] (Err "duplicate parameter names");
+    assertExpr "FnExpr: nonadjacent duplicate with different types"
+      (FnExpr [
+        {name = "x", typ = NumberType},
+        {name = "y", typ = StringType},
+        {name = "x", typ = BoolType}
+      ] BoolType (VarExpr "x")) [] (Err "duplicate parameter names");
+    assertExpr "FnExpr: duplicate parameters are rejected before the body"
+      (FnExpr [{name = "x", typ = NumberType}, {name = "x", typ = BoolType}]
+        NumberType (VarExpr "missing")) [] (Err "duplicate parameter names");
+    assertExpr "FnExpr: primitive return mismatch"
+      (FnExpr [] BoolType (NumberExpr 1.0)) [] (Err "expected boolean, got number");
+    assertExpr "FnExpr: nested function return mismatch"
+      (FnExpr [] (FunctionType [NumberType] NumberType)
+        (FnExpr [] NumberType (NumberExpr 1.0))) []
+      (Err "expected (number) -> number, got () -> number");
+    assertExpr "FnExpr: record return mismatch"
+      (FnExpr [] (RecordType [{name = "count", typ = BoolType}])
+        (RecordExpr [{name = "count", expr = NumberExpr 1.0}])) []
+      (Err "expected {count: boolean}, got {count: number}");
+    assertExpr "FnExpr: reordered return fields match and preserve the annotation"
+      (FnExpr []
+        (RecordType [{name = "count", typ = NumberType}, {name = "active", typ = BoolType}])
+        (RecordExpr [
+          {name = "active", expr = BoolExpr true},
+          {name = "count", expr = NumberExpr 1.0}
+        ])) []
+      (Ok (FunctionType []
+        (RecordType [{name = "count", typ = NumberType}, {name = "active", typ = BoolType}])));
+    assertExpr "FnExpr: body lookup error propagates"
+      (FnExpr [] NumberType (VarExpr "missing")) [] (Err "unbound variable: missing");
+    assertExpr "FnExpr: body operator error propagates"
+      (FnExpr [] NumberType (UnaryOpExpr NegOp (BoolExpr true))) []
+      (Err "bad operand type for unary operator");
+    assertExpr "FnExpr: nested parameter does not leak into the enclosing body"
+      (FnExpr [{name = "x", typ = NumberType}] NumberType
+        (BinOpExpr AddOp
+          (AppExpr (FnExpr [{name = "y", typ = NumberType}] NumberType (VarExpr "y"))
+            [NumberExpr 1.0])
+          (VarExpr "y"))) []
+      (Err "unbound variable: y");
+    assertExpr "FnExpr: parameters do not leak into sibling record fields"
+      (RecordExpr [
+        {name = "f", expr = FnExpr [{name = "value", typ = NumberType}] NumberType (VarExpr "value")},
+        {name = "outside", expr = VarExpr "value"}
+      ]) [] (Err "unbound variable: value")
+  };
+
+let testAppExpr: IO Unit =
+  let identity = FnExpr [{name = "value", typ = NumberType}] NumberType (VarExpr "value") in
+  let recordParam = FnExpr [
+    {name = "r", typ = RecordType [
+      {name = "count", typ = NumberType}, {name = "active", typ = BoolType}
+    ]}
+  ] NumberType (FieldExpr (VarExpr "r") "count") in
+  let higherOrder = FnExpr [
+    {name = "f", typ = FunctionType [NumberType] NumberType}
+  ] NumberType (AppExpr (VarExpr "f") [NumberExpr 1.0]) in
+  do (bindIO) {
+    assertExpr "AppExpr: direct identity application"
+      (AppExpr identity [NumberExpr 2.0]) [] (Ok NumberType);
+    forEachTest (fn sample =>
+      do (bindIO) {
+        assertExpr (str_concat "AppExpr: nullary function returning " sample.label)
+          (AppExpr (FnExpr [] sample.typ sample.expr) []) [] (Ok sample.typ);
+        assertExpr (str_concat "AppExpr: matching argument of type " sample.label)
+          (AppExpr
+            (FnExpr [{name = "value", typ = sample.typ}] sample.typ (VarExpr "value"))
+            [sample.expr]) [] (Ok sample.typ)
+      }
+    ) exprSamples;
+    assertExpr "AppExpr: function from the environment"
+      (AppExpr (VarExpr "function") [NumberExpr 1.0, StringExpr "text"]) sampleEnv (Ok BoolType);
+    assertExpr "AppExpr: arguments use the caller environment"
+      (AppExpr (VarExpr "function") [VarExpr "number", VarExpr "string"]) sampleEnv (Ok BoolType);
+    assertExpr "AppExpr: arguments use the nearest caller binding"
+      (AppExpr (FnExpr [{name = "value", typ = BoolType}] BoolType (VarExpr "value"))
+        [VarExpr "x"]) [scope3, scope1] (Ok BoolType);
+    assertExpr "AppExpr: callee parameters do not bind argument variables"
+      (AppExpr identity [VarExpr "value"]) [] (Err "unbound variable: value");
+    assertExpr "AppExpr: callee shadowing does not change argument lookup"
+      (AppExpr (FnExpr [{name = "number", typ = StringType}] StringType (VarExpr "number"))
+        [VarExpr "number"]) sampleEnv (Err "expected string, got number");
+    assertExpr "AppExpr: nested application of a returned function"
+      (AppExpr
+        (AppExpr (FnExpr [] (FunctionType [NumberType] NumberType) identity) [])
+        [NumberExpr 1.0]) [] (Ok NumberType);
+    assertExpr "AppExpr: function-valued record field"
+      (AppExpr (FieldExpr (RecordExpr [{name = "f", expr = identity}]) "f")
+        [NumberExpr 1.0]) [] (Ok NumberType);
+    assertExpr "AppExpr: higher-order argument"
+      (AppExpr higherOrder [identity]) [] (Ok NumberType);
+    assertExpr "AppExpr: higher-order parameter mismatch"
+      (AppExpr higherOrder [
+        FnExpr [{name = "value", typ = BoolType}] NumberType (NumberExpr 1.0)
+      ]) [] (Err "expected (number) -> number, got (boolean) -> number");
+    assertExpr "AppExpr: record argument may reorder fields"
+      (AppExpr recordParam [RecordExpr [
+        {name = "active", expr = BoolExpr true}, {name = "count", expr = NumberExpr 1.0}
+      ]]) [] (Ok NumberType);
+    assertExpr "AppExpr: record argument is missing a field"
+      (AppExpr recordParam [RecordExpr [{name = "count", expr = NumberExpr 1.0}]]) []
+      (Err "expected {count: number, active: boolean}, got {count: number}");
+    assertExpr "AppExpr: record argument has an extra field"
+      (AppExpr recordParam [RecordExpr [
+        {name = "count", expr = NumberExpr 1.0},
+        {name = "active", expr = BoolExpr true},
+        {name = "extra", expr = NullExpr}
+      ]]) []
+      (Err "expected {count: number, active: boolean}, got {count: number, active: boolean, extra: null}");
+    forEachTest (fn sample =>
+      if sample.label == "function" then pureIO unit else
+        assertExpr (str_concat "AppExpr: rejects non-function " sample.label)
+          (AppExpr sample.expr []) [] (Err "application requires a function")
+    ) exprSamples;
+    assertExpr "AppExpr: non-function error precedes argument errors"
+      (AppExpr (NumberExpr 1.0) [VarExpr "missing"]) [] (Err "application requires a function");
+    assertExpr "AppExpr: missing function error propagates"
+      (AppExpr (VarExpr "missingFunction") []) [] (Err "unbound variable: missingFunction");
+    assertExpr "AppExpr: function error precedes argument errors"
+      (AppExpr (VarExpr "missingFunction") [VarExpr "missingArgument"]) []
+      (Err "unbound variable: missingFunction");
+    assertExpr "AppExpr: invalid function body error propagates"
+      (AppExpr (FnExpr [] BoolType (NumberExpr 1.0)) []) []
+      (Err "expected boolean, got number");
+    assertExpr "AppExpr: no arguments for a non-nullary function"
+      (AppExpr identity []) [] (Err "number of arguments does not match number of parameters");
+    assertExpr "AppExpr: too few arguments"
+      (AppExpr (VarExpr "function") [NumberExpr 1.0]) sampleEnv
+      (Err "number of arguments does not match number of parameters");
+    assertExpr "AppExpr: too many arguments"
+      (AppExpr (VarExpr "function") [NumberExpr 1.0, StringExpr "x", NullExpr]) sampleEnv
+      (Err "number of arguments does not match number of parameters");
+    assertExpr "AppExpr: argument supplied to a nullary function"
+      (AppExpr (FnExpr [] NullType NullExpr) [NumberExpr 1.0]) []
+      (Err "number of arguments does not match number of parameters");
+    assertExpr "AppExpr: arity error precedes invalid argument expressions"
+      (AppExpr (VarExpr "function") [VarExpr "missing"]) sampleEnv
+      (Err "number of arguments does not match number of parameters");
+    assertExpr "AppExpr: first argument type mismatch"
+      (AppExpr (VarExpr "function") [BoolExpr true, StringExpr "x"]) sampleEnv
+      (Err "expected number, got boolean");
+    assertExpr "AppExpr: later argument type mismatch"
+      (AppExpr (VarExpr "function") [NumberExpr 1.0, BoolExpr true]) sampleEnv
+      (Err "expected string, got boolean");
+    assertExpr "AppExpr: argument order matters"
+      (AppExpr (VarExpr "function") [StringExpr "x", NumberExpr 1.0]) sampleEnv
+      (Err "expected number, got string");
+    assertExpr "AppExpr: first argument lookup error propagates"
+      (AppExpr (VarExpr "function") [VarExpr "firstMissing", StringExpr "x"]) sampleEnv
+      (Err "unbound variable: firstMissing");
+    assertExpr "AppExpr: later argument lookup error propagates"
+      (AppExpr (VarExpr "function") [NumberExpr 1.0, VarExpr "laterMissing"]) sampleEnv
+      (Err "unbound variable: laterMissing");
+    assertExpr "AppExpr: first argument error wins"
+      (AppExpr (VarExpr "function") [VarExpr "firstMissing", VarExpr "laterMissing"]) sampleEnv
+      (Err "unbound variable: firstMissing");
+    assertExpr "AppExpr: first type mismatch precedes a later lookup error"
+      (AppExpr (VarExpr "function") [BoolExpr true, VarExpr "laterMissing"]) sampleEnv
+      (Err "expected number, got boolean")
+  };
+
+let testRecordExpr: IO Unit =
+  do (bindIO) {
+    assertExpr "RecordExpr: empty record" (RecordExpr []) [] (Ok (RecordType []));
+    forEachTest (fn sample =>
+      assertExpr (str_concat "RecordExpr: field of type " sample.label)
+        (RecordExpr [{name = "value", expr = sample.expr}]) []
+        (Ok (RecordType [{name = "value", typ = sample.typ}]))
+    ) exprSamples;
+    assertExpr "RecordExpr: mixed fields retain names, types, and order"
+      (RecordExpr (map (fn sample => {name = sample.label, expr = sample.expr}) exprSamples)) []
+      (Ok (RecordType sampleBindings));
+    assertExpr "RecordExpr: values can use outer bindings"
+      (RecordExpr [{name = "value", expr = VarExpr "number"}]) sampleEnv
+      (Ok (RecordType [{name = "value", typ = NumberType}]));
+    assertExpr "RecordExpr: nested record"
+      (RecordExpr [{name = "inner", expr = RecordExpr [
+        {name = "count", expr = NumberExpr 1.0}, {name = "empty", expr = RecordExpr []}
+      ]}]) []
+      (Ok (RecordType [{name = "inner", typ = RecordType [
+        {name = "count", typ = NumberType}, {name = "empty", typ = RecordType []}
+      ]}]));
+    assertExpr "RecordExpr: duplicate adjacent field names"
+      (RecordExpr [
+        {name = "x", expr = NumberExpr 1.0}, {name = "x", expr = NumberExpr 2.0}
+      ]) [] (Err "duplicate record field names");
+    assertExpr "RecordExpr: nonadjacent duplicate with different value types"
+      (RecordExpr [
+        {name = "x", expr = NumberExpr 1.0},
+        {name = "y", expr = NullExpr},
+        {name = "x", expr = BoolExpr true}
+      ]) [] (Err "duplicate record field names");
+    assertExpr "RecordExpr: duplicate names are rejected before field expressions"
+      (RecordExpr [
+        {name = "x", expr = VarExpr "missing"}, {name = "x", expr = BoolExpr true}
+      ]) [] (Err "duplicate record field names");
+    assertExpr "RecordExpr: case-sensitive field names are distinct"
+      (RecordExpr [
+        {name = "x", expr = NumberExpr 1.0}, {name = "X", expr = BoolExpr true}
+      ]) [] (Ok (RecordType [{name = "x", typ = NumberType}, {name = "X", typ = BoolType}]));
+    assertExpr "RecordExpr: first field error propagates"
+      (RecordExpr [
+        {name = "bad", expr = VarExpr "missing"}, {name = "ok", expr = NullExpr}
+      ]) [] (Err "unbound variable: missing");
+    assertExpr "RecordExpr: later field error propagates"
+      (RecordExpr [
+        {name = "ok", expr = NullExpr}, {name = "bad", expr = VarExpr "missing"}
+      ]) [] (Err "unbound variable: missing");
+    assertExpr "RecordExpr: first error wins when multiple fields fail"
+      (RecordExpr [
+        {name = "first", expr = VarExpr "firstMissing"},
+        {name = "last", expr = VarExpr "lastMissing"}
+      ]) [] (Err "unbound variable: firstMissing");
+    assertExpr "RecordExpr: nested duplicate error propagates"
+      (RecordExpr [{name = "inner", expr = RecordExpr [
+        {name = "x", expr = NullExpr}, {name = "x", expr = NullExpr}
+      ]}]) [] (Err "duplicate record field names");
+    assertExpr "RecordExpr: field names do not bind sibling expressions"
+      (RecordExpr [
+        {name = "x", expr = NumberExpr 1.0}, {name = "copy", expr = VarExpr "x"}
+      ]) [] (Err "unbound variable: x");
+    assertExpr "RecordExpr: sibling names do not shadow outer bindings"
+      (RecordExpr [
+        {name = "number", expr = StringExpr "local field"},
+        {name = "copy", expr = VarExpr "number"}
+      ]) sampleEnv
+      (Ok (RecordType [{name = "number", typ = StringType}, {name = "copy", typ = NumberType}]))
+  };
+
+let testFieldExpr: IO Unit =
+  let fields = RecordExpr [
+    {name = "first", expr = NumberExpr 1.0},
+    {name = "middle", expr = BoolExpr true},
+    {name = "last", expr = StringExpr "text"}
+  ] in
+  do (bindIO) {
+    forEachTest (fn sample =>
+      assertExpr (str_concat "FieldExpr: field of type " sample.label)
+        (FieldExpr (RecordExpr [{name = "value", expr = sample.expr}]) "value") []
+        (Ok sample.typ)
+    ) exprSamples;
+    assertExpr "FieldExpr: first field" (FieldExpr fields "first") [] (Ok NumberType);
+    assertExpr "FieldExpr: middle field" (FieldExpr fields "middle") [] (Ok BoolType);
+    assertExpr "FieldExpr: last field" (FieldExpr fields "last") [] (Ok StringType);
+    assertExpr "FieldExpr: record variable from the environment"
+      (FieldExpr (VarExpr "record") "count") sampleEnv (Ok NumberType);
+    assertExpr "FieldExpr: nested field access"
+      (FieldExpr
+        (FieldExpr (RecordExpr [{name = "inner", expr = fields}]) "inner")
+        "last") [] (Ok StringType);
+    assertExpr "FieldExpr: record returned by a function"
+      (FieldExpr
+        (AppExpr (FnExpr [] (RecordType [{name = "value", typ = NumberType}])
+          (RecordExpr [{name = "value", expr = NumberExpr 1.0}])) [])
+        "value") [] (Ok NumberType);
+    assertExpr "FieldExpr: missing field in empty record"
+      (FieldExpr (RecordExpr []) "missing") [] (Err "record has no field named missing");
+    assertExpr "FieldExpr: missing field in nonempty record"
+      (FieldExpr fields "missing") [] (Err "record has no field named missing");
+    assertExpr "FieldExpr: field names are case sensitive"
+      (FieldExpr fields "First") [] (Err "record has no field named First");
+    forEachTest (fn sample =>
+      if sample.label == "record" then pureIO unit else
+        assertExpr (str_concat "FieldExpr: rejects non-record " sample.label)
+          (FieldExpr sample.expr "value") [] (Err "accessing field on a non-record")
+    ) exprSamples;
+    assertExpr "FieldExpr: source lookup error propagates"
+      (FieldExpr (VarExpr "missingRecord") "value") [] (Err "unbound variable: missingRecord");
+    assertExpr "FieldExpr: invalid record field error propagates"
+      (FieldExpr (RecordExpr [{name = "bad", expr = VarExpr "missing"}]) "bad") []
+      (Err "unbound variable: missing");
+    assertExpr "FieldExpr: all fields are checked before selecting a valid field"
+      (FieldExpr (RecordExpr [
+        {name = "ok", expr = NumberExpr 1.0}, {name = "bad", expr = VarExpr "missing"}
+      ]) "ok") [] (Err "unbound variable: missing");
+    assertExpr "FieldExpr: duplicate record fields are rejected before selection"
+      (FieldExpr (RecordExpr [
+        {name = "x", expr = NumberExpr 1.0}, {name = "x", expr = BoolExpr true}
+      ]) "x") [] (Err "duplicate record field names");
+    assertExpr "FieldExpr: nested missing-field error propagates"
+      (FieldExpr (FieldExpr fields "missingInner") "value") []
+      (Err "record has no field named missingInner")
+  };
+
+let testNestedExpr: IO Unit =
+  let inputType = RecordType [{name = "value", typ = NumberType}] in
+  let outputType = RecordType [{name = "value", typ = BoolType}] in
+  let identity = FnExpr [{name = "n", typ = NumberType}] NumberType (VarExpr "n") in
+  do (bindIO) {
+    assertExpr "NestedExpr: call a record builder with an arithmetic argument"
+      (AppExpr
+        (FnExpr [{name = "n", typ = NumberType}]
+          (RecordType [
+            {name = "value", typ = NumberType},
+            {name = "meta", typ = RecordType [{name = "positive", typ = BoolType}]}
+          ])
+          (RecordExpr [
+            {name = "value", expr = BinOpExpr AddOp (VarExpr "n") (NumberExpr 1.0)},
+            {name = "meta", expr = RecordExpr [
+              {name = "positive", expr = BinOpExpr GtOp (VarExpr "n") (NumberExpr 0.0)}
+            ]}
+          ]))
+        [BinOpExpr MulOp (NumberExpr 2.0) (NumberExpr 3.0)]) []
+      (Ok (RecordType [
+        {name = "value", typ = NumberType},
+        {name = "meta", typ = RecordType [{name = "positive", typ = BoolType}]}
+      ]));
+    assertExpr "NestedExpr: closure factory stored in a record and applied twice"
+      (AppExpr
+        (AppExpr
+          (FieldExpr (RecordExpr [
+            {name = "makeAdder", expr = FnExpr [{name = "x", typ = NumberType}]
+              (FunctionType [NumberType] NumberType)
+              (FnExpr [{name = "y", typ = NumberType}] NumberType
+                (BinOpExpr AddOp (VarExpr "x") (VarExpr "y")))}
+          ]) "makeAdder")
+          [NumberExpr 2.0])
+        [NumberExpr 3.0]) [] (Ok NumberType);
+    assertExpr "NestedExpr: function inside a nested record consumes a computed record"
+      (AppExpr
+        (FieldExpr (FieldExpr (RecordExpr [
+          {name = "api", expr = RecordExpr [
+            {name = "read", expr = FnExpr [{name = "r", typ = inputType}]
+              NumberType (FieldExpr (VarExpr "r") "value")}
+          ]}
+        ]) "api") "read")
+        [RecordExpr [
+          {name = "value", expr = BinOpExpr AddOp (NumberExpr 1.0) (NumberExpr 2.0)}
+        ]]) [] (Ok NumberType);
+    assertExpr "NestedExpr: string concatenation, equality, not, null equality, and logic"
+      (BinOpExpr AndOp
+        (UnaryOpExpr NotOp (BinOpExpr EqOp
+          (BinOpExpr AddOp (StringExpr "a") (StringExpr "b")) (StringExpr "c")))
+        (BinOpExpr EqOp NullExpr NullExpr)) [] (Ok BoolType);
+    assertExpr "NestedExpr: assignment with calls, arithmetic, and field access"
+      (AssignExpr "record" (RecordExpr [
+        {name = "active", expr = BinOpExpr GtOp
+          (AppExpr identity [NumberExpr 2.0]) (NumberExpr 0.0)},
+        {name = "count", expr = BinOpExpr AddOp (NumberExpr 1.0)
+          (FieldExpr (VarExpr "record") "count")}
+      ])) sampleEnv
+      (Ok (RecordType [{name = "count", typ = NumberType}, {name = "active", typ = BoolType}]));
+    assertExpr "NestedExpr: higher-order record types may reuse field names across levels"
+      (FnExpr [
+        {name = "input", typ = inputType},
+        {name = "callback", typ = FunctionType [inputType] outputType}
+      ] outputType (AppExpr (VarExpr "callback") [VarExpr "input"])) []
+      (Ok (FunctionType [inputType, FunctionType [inputType] outputType] outputType))
+  };
+
+let testCheckExpr: IO Unit =
+  do (bindIO) {
+    testNumberExpr;
+    testBoolExpr;
+    testStringExpr;
+    testNullExpr;
+    testVarExpr;
+    testAssignExpr;
+    testUnaryOpExpr;
+    testBinOpExpr;
+    testFnExpr;
+    testAppExpr;
+    testRecordExpr;
+    testFieldExpr;
+    testNestedExpr;
+    outputLnIO "✅ All passing for checkExpr tests"
+  };

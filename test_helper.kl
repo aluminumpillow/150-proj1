@@ -1,0 +1,459 @@
+# Included by test_checker.kl after checker.kl; shared fixtures live here.
+
+# Run table-driven assertions using the same IO style as testScope.
+letrec forEachTest test items =
+  match items {
+    [] => pureIO unit;
+    first :: rest =>
+      do (bindIO) {
+        test first;
+        forEachTest test rest
+      };
+  };
+
+# Compare exact results, including error messages and returned record field order.
+# Expected results do not use typeEquals, so its bugs cannot hide checkExpr bugs.
+let assertExpr label expr typeEnv expected =
+  assert label (checkExpr expr typeEnv == expected);
+
+# One expression and type for every Type constructor.
+let exprSamples = [
+  {label = "number", expr = NumberExpr 1.0, typ = NumberType},
+  {label = "boolean", expr = BoolExpr true, typ = BoolType},
+  {label = "string", expr = StringExpr "hello", typ = StringType},
+  {label = "null", expr = NullExpr, typ = NullType},
+  {
+    label = "function",
+    expr = FnExpr
+      [{name = "n", typ = NumberType}, {name = "text", typ = StringType}]
+      BoolType
+      (BoolExpr true),
+    typ = FunctionType [NumberType, StringType] BoolType
+  },
+  {
+    label = "record",
+    expr = RecordExpr [
+      {name = "count", expr = NumberExpr 1.0},
+      {name = "active", expr = BoolExpr true}
+    ],
+    typ = RecordType [
+      {name = "count", typ = NumberType},
+      {name = "active", typ = BoolType}
+    ]
+  }
+];
+
+let sampleBindings =
+  map (fn sample => {name = sample.label, typ = sample.typ}) exprSamples;
+
+let sampleScope = addBindings emptyScope sampleBindings;
+let sampleEnv = [sampleScope];
+
+# Reused to exercise malformed annotations at different nesting depths.
+let malformedRecordType = RecordType [
+  {name = "dup", typ = NumberType},
+  {name = "dup", typ = BoolType}
+];
+
+let nestedMalformedTypes = [
+  {label = "direct record", typ = malformedRecordType},
+  {label = "first function parameter", typ = FunctionType [malformedRecordType, NumberType] NullType},
+  {label = "last function parameter", typ = FunctionType [NumberType, malformedRecordType] NullType},
+  {label = "function return", typ = FunctionType [] malformedRecordType},
+  {label = "first record field", typ = RecordType [
+    {name = "bad", typ = malformedRecordType}, {name = "ok", typ = NullType}
+  ]},
+  {label = "last record field", typ = RecordType [
+    {name = "ok", typ = NullType}, {name = "bad", typ = malformedRecordType}
+  ]},
+  {label = "function in record", typ = RecordType [
+    {name = "handler", typ = FunctionType [NumberType] malformedRecordType}
+  ]},
+  {label = "record in function parameter", typ = FunctionType [
+    RecordType [{name = "inner", typ = malformedRecordType}]
+  ] BoolType},
+  {label = "function in function return", typ = FunctionType []
+    (FunctionType [BoolType] malformedRecordType)},
+  {label = "record function record function", typ = RecordType [
+    {name = "f", typ = FunctionType [] (RecordType [
+      {name = "g", typ = FunctionType [malformedRecordType] NumberType}
+    ])}
+  ]}
+];
+
+let scope1 =
+  extendScope
+    emptyScope
+    "x"
+    NumberType;
+
+let scope2 =
+  extendScope
+    scope1
+    "flag"
+    BoolType;
+
+let scope3 =
+  extendScope
+    scope2
+    "x"
+    BoolType;
+
+
+let testScope: IO Unit =
+  do (bindIO) {
+    assert "emptyScope has no bindings" (emptyScope "x" == None);
+    assert "extendScope binds a type"
+      (scope1 "x" == Some NumberType);
+    assert "extendScope preserves missing variables"
+      (scope1 "missing" == None);
+    assert "extendScope preserves old bindings"
+      (scope2 "x" == Some NumberType);
+    assert "extendScope allows shadowing"
+      (scope3 "x" == Some BoolType);
+    assert "extendScope preserves unrelated bindings when shadowing"
+      (scope3 "flag" == Some BoolType);
+    assert "extendScope leaves the original scope unchanged"
+      (scope1 "x" == Some NumberType);
+    assert "localScope of an empty environment is empty"
+      ((localScope []) "x" == None);
+    assert "localScope returns the innermost scope"
+      ((localScope [scope3, scope1]) "x" == Some BoolType);
+    assert "localScope does not search outer scopes"
+      ((localScope [emptyScope, scope1]) "x" == None);
+    assert "pushScope creates an empty local scope"
+      ((localScope (pushScope [scope1])) "x" == None);
+    assert "pushScope preserves access to outer bindings"
+      (lookup "x" (pushScope [scope1]) == Ok NumberType);
+    assert "pushScope works on an empty environment"
+      (length (pushScope []) == 1);
+    assert "initialTypeEnv contains one empty scope"
+      (length initialTypeEnv == 1 && (localScope initialTypeEnv) "x" == None);
+    outputLnIO "✅ All passing for scope tests"
+  };
+
+let testInArr: IO Unit =
+  do (bindIO) {
+    assert "inArr: empty list" (not (inArr 1 []));
+    assert "inArr: singleton hit" (inArr 1 [1]);
+    assert "inArr: singleton miss" (not (inArr 2 [1]));
+    assert "inArr: first element" (inArr 1 [1, 2, 3]);
+    assert "inArr: middle element" (inArr 2 [1, 2, 3]);
+    assert "inArr: last element" (inArr 3 [1, 2, 3]);
+    assert "inArr: absent element" (not (inArr 4 [1, 2, 3]));
+    assert "inArr: repeated elements" (inArr 2 [2, 2, 2]);
+    assert "inArr: miss among repeated elements" (not (inArr 1 [2, 2, 2]));
+    assert "inArr: zero and negative numbers" (inArr (-1) [0, -1, 1]);
+    assert "inArr: empty string" (inArr "" ["x", ""]);
+    assert "inArr: strings are case sensitive" (not (inArr "X" ["x"]));
+    assert "inArr: booleans" (inArr false [true, false]);
+    assert "inArr: boolean miss" (not (inArr false [true]));
+    assert "inArr: structural values"
+      (inArr (FunctionType [NumberType] BoolType)
+        [NullType, FunctionType [NumberType] BoolType]);
+    outputLnIO "✅ All passing for inArr tests"
+  };
+
+let testAllUnique: IO Unit =
+  do (bindIO) {
+    assert "allUnique: no records or seen names" (allUnique [] []);
+    assert "allUnique: no records with seen names" (allUnique [] ["used"]);
+    assert "allUnique: singleton"
+      (allUnique [{name = "x", typ = NumberType}] []);
+    assert "allUnique: distinct names may share a type"
+      (allUnique [
+        {name = "x", typ = NumberType},
+        {name = "y", typ = NumberType},
+        {name = "z", typ = NumberType}
+      ] []);
+    assert "allUnique: adjacent duplicate"
+      (not (allUnique [
+        {name = "x", typ = NumberType},
+        {name = "x", typ = NumberType}
+      ] []));
+    assert "allUnique: nonadjacent duplicate with different types"
+      (not (allUnique [
+        {name = "x", typ = NumberType},
+        {name = "y", typ = StringType},
+        {name = "x", typ = BoolType}
+      ] []));
+    assert "allUnique: duplicate at the end"
+      (not (allUnique [
+        {name = "x", typ = NumberType},
+        {name = "y", typ = BoolType},
+        {name = "y", typ = StringType}
+      ] []));
+    assert "allUnique: first name already seen"
+      (not (allUnique [{name = "x", typ = NumberType}] ["x"]));
+    assert "allUnique: later name already seen"
+      (not (allUnique [
+        {name = "x", typ = NumberType},
+        {name = "y", typ = BoolType}
+      ] ["other", "y"]));
+    assert "allUnique: disjoint seen names"
+      (allUnique [{name = "x", typ = NumberType}] ["y", "z"]);
+    assert "allUnique: names are case sensitive"
+      (allUnique [
+        {name = "x", typ = NumberType},
+        {name = "X", typ = BoolType}
+      ] []);
+    assert "allUnique: empty names still count as names"
+      (not (allUnique [
+        {name = "", typ = NumberType},
+        {name = "", typ = BoolType}
+      ] []));
+    assert "allUnique: works on expression fields"
+      (allUnique [
+        {name = "x", expr = NumberExpr 1.0},
+        {name = "y", expr = BoolExpr true}
+      ] []);
+    assert "allUnique: rejects duplicate expression field names"
+      (not (allUnique [
+        {name = "x", expr = NumberExpr 1.0},
+        {name = "x", expr = BoolExpr true}
+      ] []));
+    outputLnIO "✅ All passing for allUnique tests"
+  };
+
+let testAddBindings: IO Unit =
+  let unchanged = addBindings scope2 [] in
+  let extended = addBindings scope2 [
+    {name = "x", typ = StringType},
+    {name = "new", typ = NullType}
+  ] in
+  let duplicates = addBindings emptyScope [
+    {name = "x", typ = NumberType},
+    {name = "other", typ = NullType},
+    {name = "x", typ = BoolType}
+  ] in
+  do (bindIO) {
+    assert "addBindings: empty bindings into empty scope"
+      ((addBindings emptyScope []) "missing" == None);
+    assert "addBindings: empty bindings preserve existing names"
+      (unchanged "x" == Some NumberType && unchanged "flag" == Some BoolType);
+    assert "addBindings: empty bindings preserve missing names"
+      (unchanged "missing" == None);
+    assert "addBindings: singleton"
+      ((addBindings emptyScope [{name = "x", typ = NumberType}]) "x"
+        == Some NumberType);
+    forEachTest (fn binding =>
+      assert (str_concat "addBindings: binds " binding.name)
+        (sampleScope binding.name == Some binding.typ)
+    ) sampleBindings;
+    assert "addBindings: new names" (extended "new" == Some NullType);
+    assert "addBindings: shadows the base scope" (extended "x" == Some StringType);
+    assert "addBindings: preserves unrelated base bindings"
+      (extended "flag" == Some BoolType);
+    assert "addBindings: missing name" (extended "missing" == None);
+    # Duplicate validation belongs to allUnique; addBindings uses the last entry.
+    assert "addBindings: later duplicate wins" (duplicates "x" == Some BoolType);
+    assert "addBindings: duplicates preserve other entries"
+      (duplicates "other" == Some NullType);
+    assert "addBindings: original scope is unchanged" (scope2 "x" == Some NumberType);
+    outputLnIO "✅ All passing for addBindings tests"
+  };
+
+let testTypeEquals: IO Unit =
+  let recordA = RecordType [
+    {name = "count", typ = NumberType},
+    {name = "active", typ = BoolType}
+  ] in
+  let recordB = RecordType [
+    {name = "active", typ = BoolType},
+    {name = "count", typ = NumberType}
+  ] in
+  do (bindIO) {
+    # All 36 pairs include primitive equality and every constructor mismatch.
+    forEachTest (fn left =>
+      forEachTest (fn right =>
+        assert (str_concat "typeEquals: "
+          (str_concat left.label (str_concat " vs " right.label)))
+          (typeEquals left.typ right.typ == (left.label == right.label))
+      ) exprSamples
+    ) exprSamples;
+    assert "typeEquals: zero-parameter functions"
+      (typeEquals (FunctionType [] NullType) (FunctionType [] NullType));
+    assert "typeEquals: function return type differs"
+      (not (typeEquals (FunctionType [] NumberType) (FunctionType [] BoolType)));
+    assert "typeEquals: first parameter differs"
+      (not (typeEquals
+        (FunctionType [NumberType, BoolType] NullType)
+        (FunctionType [StringType, BoolType] NullType)));
+    assert "typeEquals: later parameter differs"
+      (not (typeEquals
+        (FunctionType [NumberType, BoolType] NullType)
+        (FunctionType [NumberType, StringType] NullType)));
+    assert "typeEquals: parameter order matters"
+      (not (typeEquals
+        (FunctionType [NumberType, BoolType] NullType)
+        (FunctionType [BoolType, NumberType] NullType)));
+    assert "typeEquals: fewer parameters on the left"
+      (not (typeEquals
+        (FunctionType [NumberType] NullType)
+        (FunctionType [NumberType, BoolType] NullType)));
+    assert "typeEquals: fewer parameters on the right"
+      (not (typeEquals
+        (FunctionType [NumberType, BoolType] NullType)
+        (FunctionType [NumberType] NullType)));
+    assert "typeEquals: zero vs one parameter"
+      (not (typeEquals (FunctionType [] NullType) (FunctionType [NullType] NullType)));
+    assert "typeEquals: one vs zero parameters"
+      (not (typeEquals (FunctionType [NullType] NullType) (FunctionType [] NullType)));
+    assert "typeEquals: nested function parameter equality"
+      (typeEquals
+        (FunctionType [FunctionType [NumberType] BoolType] StringType)
+        (FunctionType [FunctionType [NumberType] BoolType] StringType));
+    assert "typeEquals: nested function parameter mismatch"
+      (not (typeEquals
+        (FunctionType [FunctionType [NumberType] BoolType] StringType)
+        (FunctionType [FunctionType [StringType] BoolType] StringType)));
+    assert "typeEquals: nested function return equality"
+      (typeEquals
+        (FunctionType [] (FunctionType [NumberType] BoolType))
+        (FunctionType [] (FunctionType [NumberType] BoolType)));
+    assert "typeEquals: nested function return mismatch"
+      (not (typeEquals
+        (FunctionType [] (FunctionType [NumberType] BoolType))
+        (FunctionType [] (FunctionType [NumberType] StringType))));
+    assert "typeEquals: empty records" (typeEquals (RecordType []) (RecordType []));
+    assert "typeEquals: record order is irrelevant" (typeEquals recordA recordB);
+    assert "typeEquals: reordered records compare symmetrically" (typeEquals recordB recordA);
+    assert "typeEquals: different field name with the same type"
+      (not (typeEquals
+        (RecordType [{name = "x", typ = NumberType}])
+        (RecordType [{name = "y", typ = NumberType}])));
+    assert "typeEquals: field names are case sensitive"
+      (not (typeEquals
+        (RecordType [{name = "x", typ = NumberType}])
+        (RecordType [{name = "X", typ = NumberType}])));
+    assert "typeEquals: first field type differs"
+      (not (typeEquals recordA (RecordType [
+        {name = "count", typ = StringType}, {name = "active", typ = BoolType}
+      ])));
+    assert "typeEquals: later field type differs"
+      (not (typeEquals recordA (RecordType [
+        {name = "count", typ = NumberType}, {name = "active", typ = StringType}
+      ])));
+    assert "typeEquals: missing later field despite equal field counts"
+      (not (typeEquals recordA (RecordType [
+        {name = "count", typ = NumberType}, {name = "other", typ = BoolType}
+      ])));
+    assert "typeEquals: extra field on the left"
+      (not (typeEquals recordA (RecordType [{name = "count", typ = NumberType}])));
+    assert "typeEquals: extra field on the right"
+      (not (typeEquals (RecordType [{name = "count", typ = NumberType}]) recordA));
+    assert "typeEquals: empty vs nonempty record" (not (typeEquals (RecordType []) recordA));
+    assert "typeEquals: nonempty vs empty record" (not (typeEquals recordA (RecordType [])));
+    assert "typeEquals: reordered nested records"
+      (typeEquals
+        (RecordType [{name = "inner", typ = recordA}])
+        (RecordType [{name = "inner", typ = recordB}]));
+    assert "typeEquals: nested record mismatch"
+      (not (typeEquals
+        (RecordType [{name = "inner", typ = recordA}])
+        (RecordType [{name = "inner", typ = RecordType []}])));
+    assert "typeEquals: record parameters and returns use structural equality"
+      (typeEquals (FunctionType [recordA] recordA) (FunctionType [recordB] recordB));
+    assert "typeEquals: function-valued record fields"
+      (typeEquals
+        (RecordType [{name = "f", typ = FunctionType [recordA] recordA}])
+        (RecordType [{name = "f", typ = FunctionType [recordB] recordB}]));
+    assert "typeEquals: function-valued record field mismatch"
+      (not (typeEquals
+        (RecordType [{name = "f", typ = FunctionType [] NumberType}])
+        (RecordType [{name = "f", typ = FunctionType [] BoolType}])));
+    outputLnIO "✅ All passing for typeEquals tests"
+  };
+
+let testLookup: IO Unit =
+  do (bindIO) {
+    assert "lookup: empty environment" (lookup "x" [] == Err "unbound variable: x");
+    assert "lookup: initial environment"
+      (lookup "x" initialTypeEnv == Err "unbound variable: x");
+    assert "lookup: several empty scopes"
+      (lookup "missing" [emptyScope, emptyScope] == Err "unbound variable: missing");
+    forEachTest (fn binding =>
+      assert (str_concat "lookup: retrieves " binding.name)
+        (lookup binding.name sampleEnv == Ok binding.typ)
+    ) sampleBindings;
+    assert "lookup: local binding" (lookup "x" [scope1] == Ok NumberType);
+    assert "lookup: skips empty scopes"
+      (lookup "x" [emptyScope, emptyScope, scope1] == Ok NumberType);
+    assert "lookup: skips nonempty scopes without the name"
+      (lookup "flag" [scope1, scope2] == Ok BoolType);
+    assert "lookup: nearest binding wins" (lookup "x" [scope3, scope1] == Ok BoolType);
+    assert "lookup: reversing scope order changes the nearest binding"
+      (lookup "x" [scope1, scope3] == Ok NumberType);
+    assert "lookup: missing name across nonempty scopes"
+      (lookup "missing" [scope3, scope2, scope1] == Err "unbound variable: missing");
+    assert "lookup: names are case sensitive"
+      (lookup "X" [scope1] == Err "unbound variable: X");
+    assert "lookup: includes the exact missing name"
+      (lookup "" [] == Err "unbound variable: ");
+    outputLnIO "✅ All passing for lookup tests"
+  };
+
+let testValidateType: IO Unit =
+  do (bindIO) {
+    forEachTest (fn sample =>
+      assert (str_concat "validateType: valid " sample.label)
+        (validateType sample.typ == Ok unit)
+    ) exprSamples;
+    assert "validateType: empty record" (validateType (RecordType []) == Ok unit);
+    assert "validateType: no function parameters"
+      (validateType (FunctionType [] NullType) == Ok unit);
+    assert "validateType: repeated parameter types are valid"
+      (validateType (FunctionType [NumberType, NumberType] NumberType) == Ok unit);
+    assert "validateType: different fields may share a type"
+      (validateType (RecordType [
+        {name = "x", typ = NumberType}, {name = "y", typ = NumberType}
+      ]) == Ok unit);
+    assert "validateType: field names are case sensitive"
+      (validateType (RecordType [
+        {name = "x", typ = NumberType}, {name = "X", typ = BoolType}
+      ]) == Ok unit);
+    assert "validateType: field names may repeat across separate nested records"
+      (validateType (RecordType [
+        {name = "value", typ = NumberType},
+        {name = "child", typ = RecordType [{name = "value", typ = BoolType}]},
+        {name = "sibling", typ = RecordType [{name = "value", typ = StringType}]}
+      ]) == Ok unit);
+    assert "validateType: valid alternating records and functions"
+      (validateType (FunctionType [
+        RecordType [{name = "f", typ = FunctionType [RecordType []] BoolType}],
+        FunctionType [NumberType] (RecordType [{name = "x", typ = StringType}])
+      ] (RecordType [{name = "result", typ = FunctionType [] NullType}])) == Ok unit);
+    assert "validateType: equal-type duplicate fields are still invalid"
+      (validateType (RecordType [
+        {name = "x", typ = NumberType}, {name = "x", typ = NumberType}
+      ]) == Err "duplicate record field names");
+    assert "validateType: nonadjacent duplicate fields"
+      (validateType (RecordType [
+        {name = "x", typ = NumberType},
+        {name = "y", typ = StringType},
+        {name = "x", typ = BoolType}
+      ]) == Err "duplicate record field names");
+    assert "validateType: duplicates in the last two fields"
+      (validateType (RecordType [
+        {name = "x", typ = NumberType},
+        {name = "y", typ = StringType},
+        {name = "y", typ = BoolType}
+      ]) == Err "duplicate record field names");
+    forEachTest (fn sample =>
+      assert (str_concat "validateType: rejects " sample.label)
+        (validateType sample.typ == Err "duplicate record field names")
+    ) nestedMalformedTypes;
+    outputLnIO "✅ All passing for validateType tests"
+  };
+
+let testCheckHelpers: IO Unit =
+  do (bindIO) {
+    testScope;
+    testInArr;
+    testAllUnique;
+    testAddBindings;
+    testTypeEquals;
+    testLookup;
+    testValidateType;
+    outputLnIO "✅ All passing for helper tests"
+  };

@@ -113,12 +113,6 @@ let localScope typeEnv =
     [] => emptyScope;
   };
 
-// then to query:
-# match (localScope typeEnv) name {
-#   Some _ => ...;  
-#   None => ...;
-# };
-
 let initialTypeEnv = [emptyScope];
 
 letrec lookup name typeEnv =
@@ -131,6 +125,37 @@ letrec lookup name typeEnv =
         Some typ => Ok typ;
         None => lookup name rest;
       };
+  };
+
+// i.e. recursive check on types
+# validateType : Type -> Result Unit TypeError
+letrec validateType typ =
+  letrec validateTypes types =
+    match types {
+      [] => Ok unit;
+
+      first :: rest =>
+        match validateType first {
+          Ok _ => validateTypes rest;
+          Err err => Err err;
+        };
+    } in
+
+  match typ {
+    NumberType => Ok unit;
+    BoolType => Ok unit;
+    StringType => Ok unit;
+    NullType => Ok unit;
+    FunctionType paramTypes retType =>
+      match validateTypes paramTypes {
+        Ok _ => validateType retType;
+        Err err => Err err;
+      };
+    RecordType fieldTypes =>
+      if not (allUnique fieldTypes []) then
+        Err "duplicate record field names"
+      else
+        validateTypes (map (fn field => field.typ) fieldTypes);
   };
 
 
@@ -253,20 +278,26 @@ letrec checkExpr expr typeEnv =
       };
 
     FnExpr params returnType body =>
-      // uniqueness check
+      // uniqueness check on params not enough
       if not (allUnique params []) then
         Err "duplicate parameter names"
       else
-        let newScope = addBindings emptyScope params in
-        let newEnv = newScope :: typeEnv in
-
-        match checkExpr body newEnv {
-          Ok actualBodyType =>
-            if typeEquals returnType actualBodyType then
-              Ok (FunctionType (map (fn x => x.typ)  params) returnType)
-            else
-              Err (typeMismatch returnType actualBodyType);
+        let fnType = FunctionType (map (fn p => p.typ) params) returnType in
+        // recursively check params using validateType
+        match validateType fnType {
           Err err => Err err;
+          Ok _ => 
+            let newScope = addBindings emptyScope params in
+            let newEnv = newScope :: typeEnv in
+    
+            match checkExpr body newEnv {
+              Ok actualBodyType =>
+                if typeEquals returnType actualBodyType then
+                  Ok fnType
+                else
+                  Err (typeMismatch returnType actualBodyType);
+              Err err => Err err;
+            };
         };
         
     AppExpr function arguments =>
@@ -355,10 +386,120 @@ letrec checkExpr expr typeEnv =
   };
 
 # checkStmt    : Stmt -> TypeEnv -> Result TypeEnv TypeError
-# letrec checkStmt stmt typeEnv =
-#   match stmt {
+letrec checkStmt stmt typeEnv =
+  
+  // T-SeqEmpty and T-SeqCons helper/checker
+  letrec checkSeq stmts typeEnv =
+    match stmts {
+      [] => Ok typeEnv;
+  
+      first :: rest =>
+        match checkStmt first typeEnv {
+          Ok nextEnv => checkSeq rest nextEnv;
+          Err err => Err err;
+        };
+    } in 
+
+  match stmt {
+    LetStmt name annotation expr =>
+      match checkExpr expr typeEnv {
+        Ok actual =>
+          match typeEnv {
+            [] => Err "type environment has no current scope";
     
+            innerScope :: outerScopes =>
+              match innerScope name {
+                Some _ =>
+                  Err (str_concat "duplicate declaration: " name);
     
-#   };
+                None =>
+                  let newScope = extendScope innerScope name actual in
+                  let newEnv = newScope :: outerScopes in
+                  match annotation {
+                    None => Ok newEnv;
+                    Some expected =>
+                      match validateType expected {
+                        Ok _ =>
+                          if typeEquals actual expected then
+                            Ok newEnv
+                          else
+                            Err (typeMismatch expected actual);
+                        Err err => Err err;
+                      };
+                  };
+              };
+          };
+          Err err => Err err;
+      };
+
+    ExprStmt expr =>
+      match checkExpr expr typeEnv {
+        Ok _ => Ok typeEnv;
+        Err err => Err err;
+      };
+
+    BlockStmt stmts =>
+      match checkSeq stmts (pushScope typeEnv){
+        Ok _ => Ok typeEnv;
+        Err err => Err err;  
+      };
+      
+    IfStmt expr thenBlock optionElseBlock  =>
+      match checkExpr expr typeEnv {
+        Ok actual =>
+          if not (typeEquals BoolType actual) then
+            Err (typeMismatch BoolType actual)
+          else
+            match checkStmt (BlockStmt thenBlock) typeEnv {
+              Ok _ =>
+                match optionElseBlock {
+                  Some elseBlock =>
+                    match checkStmt (BlockStmt elseBlock) typeEnv{
+                      Ok _ => Ok typeEnv;
+                      Err err => Err err;
+                    };
+                  None => Ok typeEnv;
+                };
+              Err err =>
+                Err err;
+            };
+        Err err =>
+          Err err;
+      };
+    
+    WhileStmt expr block =>
+      match checkExpr expr typeEnv {
+      Ok actual =>
+        if not (typeEquals BoolType actual) then
+          Err (typeMismatch BoolType actual)
+        else
+          match checkStmt (BlockStmt block) typeEnv {
+            Ok _ => Ok typeEnv;
+            Err err => Err err;
+          };
+      Err err =>
+        Err err;
+      };
+
+    _ => Err "invalid statement type";
+  };
+
+// checkProgram : Program -> Result Unit TypeError
+let checkProgram program =
+  letrec checkSeq stmts typeEnv =
+    match stmts {
+      [] => Ok typeEnv;
+  
+      first :: rest =>
+        match checkStmt first typeEnv {
+          Ok nextEnv => checkSeq rest nextEnv;
+          Err err => Err err;
+        };
+    } in
+    
+  match checkSeq program initialTypeEnv {
+    Ok _ => Ok unit;
+    Err err => Err err;
+    };
 
 let main = pureIO unit;

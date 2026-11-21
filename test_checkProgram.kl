@@ -1,0 +1,314 @@
+# Included by test_checker.kl after checker.kl and test_helper.kl.
+# Programs return Result Unit String, so these results contain no scope functions.
+let assertProgram label program expected =
+  assert label (checkProgram program == expected);
+
+let testProgramBasics: IO Unit =
+  do (bindIO) {
+    assertProgram "checkProgram: empty program" [] (Ok unit);
+    forEachTest (fn sample =>
+      do (bindIO) {
+        assertProgram (str_concat "checkProgram: inferred declaration of " sample.label)
+          [LetStmt "value" None sample.expr, ExprStmt (VarExpr "value")] (Ok unit);
+        assertProgram (str_concat "checkProgram: annotated declaration of " sample.label)
+          [LetStmt "value" (Some sample.typ) sample.expr, ExprStmt (VarExpr "value")] (Ok unit);
+        assertProgram (str_concat "checkProgram: expression statement of " sample.label)
+          [ExprStmt sample.expr] (Ok unit)
+      }
+    ) exprSamples;
+    assertProgram "checkProgram: declaration environment reaches later statements" [
+      LetStmt "x" None (NumberExpr 1.0),
+      LetStmt "y" (Some NumberType) (BinOpExpr AddOp (VarExpr "x") (NumberExpr 2.0)),
+      LetStmt "z" None (BinOpExpr MulOp (VarExpr "y") (VarExpr "x")),
+      ExprStmt (AssignExpr "x" (VarExpr "z")),
+      ExprStmt (BinOpExpr EqOp (VarExpr "x") (VarExpr "y"))
+    ] (Ok unit);
+    assertProgram "checkProgram: empty scoped statements are accepted" [
+      BlockStmt [],
+      IfStmt (BoolExpr true) [] None,
+      IfStmt (BoolExpr false) [] (Some []),
+      WhileStmt (BoolExpr false) []
+    ] (Ok unit);
+    assertProgram "checkProgram: earlier declaration is captured by a function" [
+      LetStmt "offset" None (NumberExpr 2.0),
+      LetStmt "addOffset" None
+        (FnExpr [{name = "n", typ = NumberType}] NumberType
+          (BinOpExpr AddOp (VarExpr "n") (VarExpr "offset"))),
+      LetStmt "answer" None (AppExpr (VarExpr "addOffset") [NumberExpr 40.0]),
+      ExprStmt (AssignExpr "offset" (VarExpr "answer"))
+    ] (Ok unit);
+    assertProgram "checkProgram: reordered record annotation works across statements" [
+      LetStmt "r" (Some (RecordType [
+        {name = "active", typ = BoolType}, {name = "count", typ = NumberType}
+      ])) (RecordExpr [
+        {name = "count", expr = NumberExpr 1.0}, {name = "active", expr = BoolExpr true}
+      ]),
+      IfStmt (FieldExpr (VarExpr "r") "active") [
+        ExprStmt (BinOpExpr AddOp (FieldExpr (VarExpr "r") "count") (NumberExpr 1.0))
+      ] None
+    ] (Ok unit)
+  };
+
+let testProgramDeclarations: IO Unit =
+  do (bindIO) {
+    assertProgram "checkProgram: use before declaration" [
+      ExprStmt (VarExpr "later"),
+      LetStmt "later" None (NumberExpr 1.0)
+    ] (Err "unbound variable: later");
+    assertProgram "checkProgram: inferred declaration cannot refer to itself" [
+      LetStmt "self" None (VarExpr "self")
+    ] (Err "unbound variable: self");
+    assertProgram "checkProgram: annotation does not enable self-reference" [
+      LetStmt "self" (Some NumberType) (VarExpr "self")
+    ] (Err "unbound variable: self");
+    assertProgram "checkProgram: let-bound functions are not implicitly recursive" [
+      LetStmt "recursive" None
+        (FnExpr [] NumberType (AppExpr (VarExpr "recursive") []))
+    ] (Err "unbound variable: recursive");
+    assertProgram "checkProgram: later functions are not hoisted" [
+      LetStmt "first" None (FnExpr [] NumberType (AppExpr (VarExpr "second") [])),
+      LetStmt "second" None (FnExpr [] NumberType (AppExpr (VarExpr "first") []))
+    ] (Err "unbound variable: second");
+    assertProgram "checkProgram: duplicate top-level declaration with the same type" [
+      LetStmt "x" None (NumberExpr 1.0),
+      LetStmt "x" None (NumberExpr 2.0)
+    ] (Err "duplicate declaration: x");
+    assertProgram "checkProgram: duplicate top-level declaration with a different type" [
+      LetStmt "x" None (NumberExpr 1.0),
+      LetStmt "x" (Some StringType) (StringExpr "second")
+    ] (Err "duplicate declaration: x");
+    assertProgram "checkProgram: case-sensitive declaration names" [
+      LetStmt "x" None (NumberExpr 1.0),
+      LetStmt "X" None (BoolExpr true),
+      ExprStmt (AssignExpr "x" (NumberExpr 2.0)),
+      ExprStmt (UnaryOpExpr NotOp (VarExpr "X"))
+    ] (Ok unit);
+    assertProgram "checkProgram: expression statements do not introduce bindings" [
+      ExprStmt (FnExpr [{name = "parameter", typ = NumberType}] NumberType (VarExpr "parameter")),
+      ExprStmt (VarExpr "parameter")
+    ] (Err "unbound variable: parameter");
+    assertProgram "checkProgram: first invocation may declare a global" [
+      LetStmt "isolatedGlobal" None (NumberExpr 1.0)
+    ] (Ok unit);
+    assertProgram "checkProgram: another invocation starts with an empty scope" [
+      ExprStmt (VarExpr "isolatedGlobal")
+    ] (Err "unbound variable: isolatedGlobal");
+    assertProgram "checkProgram: a fresh invocation may reuse a global name" [
+      LetStmt "isolatedGlobal" None (BoolExpr true)
+    ] (Ok unit)
+  };
+
+let testProgramScopes: IO Unit =
+  do (bindIO) {
+    assertProgram "checkProgram: nested shadowing restores each outer binding" [
+      LetStmt "x" None (NumberExpr 1.0),
+      BlockStmt [
+        LetStmt "x" None (StringExpr "inner"),
+        BlockStmt [
+          LetStmt "x" None (BoolExpr true),
+          ExprStmt (UnaryOpExpr NotOp (VarExpr "x"))
+        ],
+        ExprStmt (BinOpExpr AddOp (VarExpr "x") (StringExpr " text"))
+      ],
+      ExprStmt (BinOpExpr AddOp (VarExpr "x") (NumberExpr 2.0))
+    ] (Ok unit);
+    assertProgram "checkProgram: sibling blocks may reuse local names" [
+      BlockStmt [LetStmt "local" None (NumberExpr 1.0)],
+      BlockStmt [LetStmt "local" None (BoolExpr true)],
+      LetStmt "local" None (StringExpr "top level"),
+      ExprStmt (BinOpExpr AddOp (VarExpr "local") (StringExpr "!"))
+    ] (Ok unit);
+    assertProgram "checkProgram: block declarations do not escape" [
+      BlockStmt [LetStmt "blockLocal" None (NumberExpr 1.0)],
+      ExprStmt (VarExpr "blockLocal")
+    ] (Err "unbound variable: blockLocal");
+    assertProgram "checkProgram: then declarations do not escape" [
+      IfStmt (BoolExpr true) [LetStmt "thenLocal" None (NumberExpr 1.0)] None,
+      ExprStmt (VarExpr "thenLocal")
+    ] (Err "unbound variable: thenLocal");
+    assertProgram "checkProgram: else declarations do not escape" [
+      IfStmt (BoolExpr false) [] (Some [LetStmt "elseLocal" None (NumberExpr 1.0)]),
+      ExprStmt (VarExpr "elseLocal")
+    ] (Err "unbound variable: elseLocal");
+    assertProgram "checkProgram: loop declarations do not escape" [
+      WhileStmt (BoolExpr false) [LetStmt "loopLocal" None (NumberExpr 1.0)],
+      ExprStmt (VarExpr "loopLocal")
+    ] (Err "unbound variable: loopLocal");
+    assertProgram "checkProgram: branches have independent scopes" [
+      IfStmt (BoolExpr true) [LetStmt "local" None (NumberExpr 1.0)]
+        (Some [LetStmt "local" None (BoolExpr true)]),
+      LetStmt "local" None (StringExpr "outside")
+    ] (Ok unit);
+    assertProgram "checkProgram: else cannot see a then-local declaration" [
+      IfStmt (BoolExpr true) [LetStmt "thenOnly" None (NumberExpr 1.0)]
+        (Some [ExprStmt (VarExpr "thenOnly")])
+    ] (Err "unbound variable: thenOnly");
+    assertProgram "checkProgram: branch and loop shadowing preserve outer types" [
+      LetStmt "x" None (NumberExpr 1.0),
+      IfStmt (BoolExpr true) [
+        LetStmt "x" None (StringExpr "then"),
+        ExprStmt (AssignExpr "x" (StringExpr "updated"))
+      ] (Some [
+        LetStmt "x" None (BoolExpr true),
+        ExprStmt (AssignExpr "x" (BoolExpr false))
+      ]),
+      WhileStmt (BoolExpr false) [
+        LetStmt "x" None NullExpr,
+        ExprStmt (AssignExpr "x" NullExpr)
+      ],
+      ExprStmt (AssignExpr "x" (NumberExpr 2.0))
+    ] (Ok unit);
+    assertProgram "checkProgram: nested block local cannot escape into its enclosing block" [
+      BlockStmt [
+        BlockStmt [LetStmt "deep" None (BoolExpr true)],
+        ExprStmt (VarExpr "deep")
+      ]
+    ] (Err "unbound variable: deep")
+  };
+
+let testProgramErrors: IO Unit =
+  let invalidRecord = RecordType [
+    {name = "duplicate", typ = NumberType}, {name = "duplicate", typ = BoolType}
+  ] in
+  do (bindIO) {
+    assertProgram "checkProgram: first statement error wins" [
+      ExprStmt (VarExpr "firstMissing"),
+      ExprStmt (VarExpr "lastMissing")
+    ] (Err "unbound variable: firstMissing");
+    assertProgram "checkProgram: middle statement error propagates" [
+      LetStmt "x" None (NumberExpr 1.0),
+      ExprStmt (VarExpr "middleMissing"),
+      ExprStmt (AssignExpr "x" (NumberExpr 2.0))
+    ] (Err "unbound variable: middleMissing");
+    assertProgram "checkProgram: last statement error propagates" [
+      LetStmt "x" None (NumberExpr 1.0),
+      ExprStmt (AssignExpr "x" (NumberExpr 2.0)),
+      ExprStmt (VarExpr "lastMissing")
+    ] (Err "unbound variable: lastMissing");
+    assertProgram "checkProgram: annotation mismatch propagates" [
+      LetStmt "x" (Some StringType) (NumberExpr 1.0)
+    ] (Err "expected string, got number");
+    assertProgram "checkProgram: invalid record annotation is rejected" [
+      LetStmt "x" (Some invalidRecord) (RecordExpr [])
+    ] (Err "duplicate record field names");
+    assertProgram "checkProgram: deeply nested function annotation is rejected" [
+      LetStmt "f" (Some (FunctionType [
+        RecordType [{name = "callback", typ = FunctionType [] invalidRecord}]
+      ] NumberType)) (NumberExpr 1.0)
+    ] (Err "duplicate record field names");
+    assertProgram "checkProgram: function parameter annotation is validated" [
+      LetStmt "f" None (FnExpr [{name = "r", typ = invalidRecord}] NumberType (NumberExpr 1.0))
+    ] (Err "duplicate record field names");
+    assertProgram "checkProgram: function return annotation is validated" [
+      LetStmt "f" None (FnExpr [] (FunctionType [] invalidRecord) (NumberExpr 1.0))
+    ] (Err "duplicate record field names");
+    assertProgram "checkProgram: initializer error precedes invalid annotation" [
+      LetStmt "x" (Some invalidRecord) (VarExpr "initializerMissing")
+    ] (Err "unbound variable: initializerMissing");
+    assertProgram "checkProgram: duplicate declaration precedes annotation validation" [
+      LetStmt "x" None (NumberExpr 1.0),
+      LetStmt "x" (Some invalidRecord) (NumberExpr 2.0)
+    ] (Err "duplicate declaration: x");
+    assertProgram "checkProgram: assignment type mismatch propagates" [
+      LetStmt "x" None (NumberExpr 1.0),
+      ExprStmt (AssignExpr "x" (BoolExpr true))
+    ] (Err "assignment type mismatch");
+    assertProgram "checkProgram: non-boolean if condition precedes branch errors" [
+      IfStmt (NumberExpr 1.0) [ExprStmt (VarExpr "branchMissing")] None
+    ] (Err "expected boolean, got number");
+    assertProgram "checkProgram: non-boolean while condition precedes body errors" [
+      WhileStmt NullExpr [ExprStmt (VarExpr "bodyMissing")]
+    ] (Err "expected boolean, got null");
+    assertProgram "checkProgram: false then branch is still checked" [
+      IfStmt (BoolExpr false) [ExprStmt (VarExpr "thenMissing")] None
+    ] (Err "unbound variable: thenMissing");
+    assertProgram "checkProgram: true condition does not skip the else branch" [
+      IfStmt (BoolExpr true) [] (Some [ExprStmt (VarExpr "elseMissing")])
+    ] (Err "unbound variable: elseMissing");
+    assertProgram "checkProgram: false loop body is still checked" [
+      WhileStmt (BoolExpr false) [ExprStmt (VarExpr "bodyMissing")]
+    ] (Err "unbound variable: bodyMissing");
+    assertProgram "checkProgram: then error precedes else error and later statements" [
+      IfStmt (BoolExpr true) [ExprStmt (VarExpr "thenMissing")]
+        (Some [ExprStmt (VarExpr "elseMissing")]),
+      ExprStmt (VarExpr "laterMissing")
+    ] (Err "unbound variable: thenMissing");
+    assertProgram "checkProgram: nested duplicate declaration propagates" [
+      BlockStmt [
+        LetStmt "x" None (NumberExpr 1.0),
+        LetStmt "x" None (NumberExpr 2.0)
+      ]
+    ] (Err "duplicate declaration: x");
+    assertProgram "checkProgram: invalid expression inside nested control flow propagates" [
+      IfStmt (BoolExpr true) [
+        WhileStmt (BoolExpr false) [
+          BlockStmt [ExprStmt (UnaryOpExpr NegOp (BoolExpr true))]
+        ]
+      ] None
+    ] (Err "bad operand type for unary operator")
+  };
+
+let testProgramNested: IO Unit =
+  do (bindIO) {
+    assertProgram "checkProgram: higher-order closures, record functions, nested calls and control flow" [
+      LetStmt "increment" (Some (FunctionType [NumberType] NumberType))
+        (FnExpr [{name = "n", typ = NumberType}] NumberType
+          (BinOpExpr AddOp (VarExpr "n") (NumberExpr 1.0))),
+      LetStmt "twice" None
+        (FnExpr [{name = "f", typ = FunctionType [NumberType] NumberType}]
+          (FunctionType [NumberType] NumberType)
+          (FnExpr [{name = "x", typ = NumberType}] NumberType
+            (AppExpr (VarExpr "f") [AppExpr (VarExpr "f") [VarExpr "x"]]))),
+      LetStmt "tools" None (RecordExpr [
+        {name = "transform", expr = AppExpr (VarExpr "twice") [VarExpr "increment"]},
+        {name = "settings", expr = RecordExpr [
+          {name = "enabled", expr = BoolExpr true},
+          {name = "prefix", expr = StringExpr "result: "}
+        ]}
+      ]),
+      LetStmt "result" (Some NumberType)
+        (AppExpr (FieldExpr (VarExpr "tools") "transform") [
+          BinOpExpr MulOp (NumberExpr 2.0) (NumberExpr 3.0)
+        ]),
+      IfStmt
+        (BinOpExpr AndOp
+          (FieldExpr (FieldExpr (VarExpr "tools") "settings") "enabled")
+          (BinOpExpr GeOp (VarExpr "result") (NumberExpr 0.0))) [
+        BlockStmt [
+          LetStmt "result" None
+            (BinOpExpr AddOp
+              (FieldExpr (FieldExpr (VarExpr "tools") "settings") "prefix")
+              (StringExpr "ok")),
+          ExprStmt (BinOpExpr EqOp (VarExpr "result") (StringExpr "result: ok"))
+        ]
+      ] (Some [ExprStmt (AssignExpr "result" (NumberExpr 0.0))]),
+      WhileStmt (BinOpExpr LtOp (VarExpr "result") (NumberExpr 10.0)) [
+        LetStmt "next" None (AppExpr (VarExpr "increment") [VarExpr "result"]),
+        ExprStmt (AssignExpr "result" (VarExpr "next"))
+      ],
+      ExprStmt (BinOpExpr EqOp (VarExpr "result") (NumberExpr 10.0))
+    ] (Ok unit);
+    assertProgram "checkProgram: nested valid function and record annotations" [
+      LetStmt "box" (Some (RecordType [{name = "convert", typ = FunctionType [
+        RecordType [{name = "n", typ = NumberType}]
+      ] (RecordType [{name = "value", typ = NumberType}])}]))
+        (RecordExpr [{name = "convert", expr = FnExpr [
+          {name = "input", typ = RecordType [{name = "n", typ = NumberType}]}
+        ] (RecordType [{name = "value", typ = NumberType}])
+          (RecordExpr [{name = "value", expr = FieldExpr (VarExpr "input") "n"}])}]),
+      LetStmt "output" None (AppExpr (FieldExpr (VarExpr "box") "convert") [
+        RecordExpr [{name = "n", expr = BinOpExpr AddOp (NumberExpr 1.0) (NumberExpr 2.0)}]
+      ]),
+      ExprStmt (BinOpExpr AddOp (FieldExpr (VarExpr "output") "value") (NumberExpr 3.0))
+    ] (Ok unit)
+  };
+
+let testCheckProgram: IO Unit =
+  do (bindIO) {
+    testProgramBasics;
+    testProgramDeclarations;
+    testProgramScopes;
+    testProgramErrors;
+    testProgramNested;
+    outputLnIO "✅ All passing for checkProgram tests"
+  };
