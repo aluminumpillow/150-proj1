@@ -110,7 +110,7 @@ let applyUnOp op v =
   match op {
     NegOp =>
       match v {
-        NumberVal n => Ok (NumberVal (0.0 - n));
+        NumberVal n => Ok (NumberVal (0.0 -. n));
         _ => Err "invalid operand for -";
       };
     NotOp =>
@@ -151,23 +151,27 @@ let applyBinOp op v1 v2 =
             StringVal b => Ok (StringVal (str_concat a b));
             _ => Err "invalid operands for +";
           };
-        _ => numOp (fn a b => NumberVal (a + b)) v1 v2;
+        _ => numOp (fn a b => NumberVal (a +. b)) v1 v2;
       };
-    SubOp => numOp (fn a b => NumberVal (a - b)) v1 v2;
-    MulOp => numOp (fn a b => NumberVal (a * b)) v1 v2;
+    SubOp => numOp (fn a b => NumberVal (a -. b)) v1 v2;
+    MulOp => numOp (fn a b => NumberVal (a *. b)) v1 v2;
     DivOp =>
-      match v2 {
-        NumberVal b =>
-          if b == 0.0 then
-            Err "division by zero"
-          else
-            numOp (fn a b => NumberVal (a / b)) v1 v2;
+      match v1 {
+        NumberVal a =>
+          match v2 {
+            NumberVal b =>
+              if b == 0.0 then
+                Err "division by zero"
+              else
+                numOp (fn a b => NumberVal (a /. b)) v1 v2;
+            _ => Err "invalid operands for /";
+          };
         _ => Err "invalid operands for /";
       };
-    LtOp => numOp (fn a b => BoolVal (a < b))  v1 v2;
-    LeOp => numOp (fn a b => BoolVal (a <= b)) v1 v2;
-    GtOp => numOp (fn a b => BoolVal (a > b))  v1 v2;
-    GeOp => numOp (fn a b => BoolVal (a >= b)) v1 v2;
+    LtOp => numOp (fn a b => BoolVal (a <. b))  v1 v2;
+    LeOp => numOp (fn a b => BoolVal (a <=. b)) v1 v2;
+    GtOp => numOp (fn a b => BoolVal (a >. b))  v1 v2;
+    GeOp => numOp (fn a b => BoolVal (a >=. b)) v1 v2;
     EqOp =>
       match (primEq v1 v2) {
         Ok b => Ok (BoolVal b);
@@ -246,8 +250,52 @@ letrec evalExpr expr env store =
     // E-Binary
     BinOpExpr op e1 e2 =>
       match op {
-        AndOp => Err "unimplemented: && (4d)";
-        OrOp  => Err "unimplemented: || (4d)";
+        AndOp => 
+          // E-AndFalse, E-AndTrue
+          // first condition: recursively evaluate e1 under same env and store
+          match (evalExpr e1 env store) {
+            Err err => Err err;
+            Ok r1 =>
+              match r1.val {
+                BoolVal false =>
+                  Ok {val = BoolVal false, store = r1.store};
+          // second condition: recursively evaluate e2 under same env but r1.store
+                BoolVal true =>
+                   match (evalExpr e2 env r1.store) {
+                     Err err => Err err;
+                     Ok r2 =>
+                       match r2.val {
+                         BoolVal b =>
+                           Ok {val = BoolVal b, store = r2.store};
+                           _ => Err "right operand of && must be a boolean";
+                       };
+                  };
+                  _ => Err "left operand of && must be a boolean";
+              };
+          };
+        OrOp => 
+          // basically opposite of AndOp
+          // E-OrTrue, e-OrFalse
+          // first condition: 
+          match (evalExpr e1 env store) {
+            Err err => Err err;
+            Ok r1 =>
+              match r1.val {
+                BoolVal true => // true then Ok, else second condition
+                  Ok {val = BoolVal true, store = r1.store};
+                BoolVal false =>
+                   match (evalExpr e2 env r1.store) {
+                     Err err => Err err;
+                     Ok r2 =>
+                       match r2.val {
+                         BoolVal b =>
+                           Ok {val = BoolVal b, store = r2.store};
+                         _ => Err "right operand of && must be a boolean";
+                       };
+                  };
+                  _ => Err "left operand of || must be a boolean";
+              };
+          };
         _ =>
           match (evalExpr e1 env store) {
             Err err => Err err;
@@ -264,8 +312,7 @@ letrec evalExpr expr env store =
       };
     
     _ =>
-      Err "unimplemented expression"; // for 4c+
+      Err "unimplemented expression"; // for 4e+
   };
-  
 
-  let main = pureIO unit;
+let main = pureIO unit;
