@@ -105,6 +105,82 @@ let updateStore loc val store =
   # | VarExpr String
   # | AssignExpr String Expr
 
+# applyUnOp : UnaryOp -> Value -> Result Value RuntimeError
+let applyUnOp op v =
+  match op {
+    NegOp =>
+      match v {
+        NumberVal n => Ok (NumberVal (0.0 - n));
+        _ => Err "invalid operand for -";
+      };
+    NotOp =>
+      match v {
+        BoolVal b => Ok (BoolVal (not b));
+        _ => Err "invalid operand for !";
+      };
+  };
+
+# numOp : (Float -> Float -> Value) -> Value -> Value -> Result Value RuntimeError
+let numOp f v1 v2 =
+  match v1 {
+    NumberVal a =>
+      match v2 {
+        NumberVal b => Ok (f a b);
+        _ => Err "invalid operands: expected numbers";
+      };
+    _ => Err "invalid operands: expected numbers";
+  };
+
+# primEq : Value -> Value -> Result Bool RuntimeError
+let primEq v1 v2 =
+  match v1 {
+    NumberVal a => match v2 { NumberVal b => Ok (a == b); _ => Err "invalid equality"; };
+    BoolVal a   => match v2 { BoolVal b   => Ok (a == b); _ => Err "invalid equality"; };
+    StringVal a => match v2 { StringVal b => Ok (a == b); _ => Err "invalid equality"; };
+    NullVal     => match v2 { NullVal     => Ok true;     _ => Err "invalid equality"; };
+    _ => Err "invalid equality";
+  };
+
+# applyBinOp : BinOp -> Value -> Value -> Result Value RuntimeError
+let applyBinOp op v1 v2 =
+  match op {
+    AddOp =>
+      match v1 {
+        StringVal a =>
+          match v2 {
+            StringVal b => Ok (StringVal (str_concat a b));
+            _ => Err "invalid operands for +";
+          };
+        _ => numOp (fn a b => NumberVal (a + b)) v1 v2;
+      };
+    SubOp => numOp (fn a b => NumberVal (a - b)) v1 v2;
+    MulOp => numOp (fn a b => NumberVal (a * b)) v1 v2;
+    DivOp =>
+      match v2 {
+        NumberVal b =>
+          if b == 0.0 then
+            Err "division by zero"
+          else
+            numOp (fn a b => NumberVal (a / b)) v1 v2;
+        _ => Err "invalid operands for /";
+      };
+    LtOp => numOp (fn a b => BoolVal (a < b))  v1 v2;
+    LeOp => numOp (fn a b => BoolVal (a <= b)) v1 v2;
+    GtOp => numOp (fn a b => BoolVal (a > b))  v1 v2;
+    GeOp => numOp (fn a b => BoolVal (a >= b)) v1 v2;
+    EqOp =>
+      match (primEq v1 v2) {
+        Ok b => Ok (BoolVal b);
+        Err err => Err err;
+      };
+    NeqOp =>
+      match (primEq v1 v2) {
+        Ok b => Ok (BoolVal (not b));
+        Err err => Err err;
+      };
+    _ => Err "not a strict operator";
+  };
+
 # evalExpr : Expr -> Env -> Store -> Result { val: Value, store: Store } RuntimeError
 letrec evalExpr expr env store =
   match expr {
@@ -155,9 +231,41 @@ letrec evalExpr expr env store =
               Ok {val = res.val, store = (updateStore loc res.val res.store)};
           };
         };
-      _ =>
+
+    // E-Unary
+    UnaryOpExpr op e =>
+      match (evalExpr e env store) {
+        Err err => Err err;
+        Ok r =>
+          match (applyUnOp op r.val) {
+            Err err => Err err;
+            Ok v2 => Ok {val = v2, store = r.store};
+          };
+      };
+
+    // E-Binary
+    BinOpExpr op e1 e2 =>
+      match op {
+        AndOp => Err "unimplemented: && (4d)";
+        OrOp  => Err "unimplemented: || (4d)";
+        _ =>
+          match (evalExpr e1 env store) {
+            Err err => Err err;
+            Ok r1 =>
+              match (evalExpr e2 env r1.store) {
+                Err err => Err err;
+                Ok r2 =>
+                  match (applyBinOp op r1.val r2.val) {
+                    Err err => Err err;
+                    Ok v => Ok {val = v, store = r2.store};
+                  };
+              };
+          };
+      };
+    
+    _ =>
       Err "unimplemented expression"; // for 4c+
-    };
+  };
   
 
   let main = pureIO unit;
