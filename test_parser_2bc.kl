@@ -1,0 +1,213 @@
+# NOTE: these tests are for 2b adn 2c; test_parser.kl is for 2a
+include "parser.kl";
+
+let parsesAs source expected =
+  match parse source {
+    Ok actual => actual == expected;
+    Err ignored => false;
+  };
+
+let failsParse source =
+  match parse source {
+    Ok ignored => false;
+    Err ignored => true;
+  };
+
+let typeParsesAs source expected =
+  match runParser (keepLeft typeParser endOfInput) source {
+    Ok r => r.value == expected;
+    Err ignored => false;
+  };
+
+let exprParsesAs source expected =
+  match runParser (keepLeft expressionParser endOfInput) source {
+    Ok r => r.value == expected;
+    Err ignored => false;
+  };
+
+let testProgramGrammar: IO Unit =
+  do (bindIO) {
+    assert "empty input"
+      (parsesAs "" []);
+    assert "only whitespace and comments"
+      (parsesAs " // comment\n\t// second" []);
+    assert "CR-only comment ends at line break"
+      (parsesAs "// comment\rlet x = 1;"
+        [LetStmt "x" None (NumberExpr 1.0)]);
+    assert "let without annotation"
+      (parsesAs "let x = 1;"
+        [LetStmt "x" None (NumberExpr 1.0)]);
+    assert "let with annotation"
+      (parsesAs "let x: number = 10;"
+        [LetStmt "x" (Some NumberType) (NumberExpr 10.0)]);
+    assert "unary minus is separate from number literal"
+      (parsesAs "let x = -5;"
+        [LetStmt "x" None (UnaryOpExpr NegOp (NumberExpr 5.0))]);
+    assert "multiple statements and trailing comment"
+      (parsesAs "let a = true; let b = false; // done"
+        [LetStmt "a" None (BoolExpr true),
+         LetStmt "b" None (BoolExpr false)]);
+    assert "blocks and nested shadowing are syntax"
+      (parsesAs "{ let x = 2; { x = 3; } }"
+        [BlockStmt [
+          LetStmt "x" None (NumberExpr 2.0),
+          BlockStmt [ExprStmt (AssignExpr "x" (NumberExpr 3.0))]
+        ]]);
+    assert "if without else uses None"
+      (parsesAs "if (true) { let x = 1; }"
+        [IfStmt (BoolExpr true)
+          [LetStmt "x" None (NumberExpr 1.0)] None]);
+    assert "if with else"
+      (parsesAs "if (false) {} else { true; }"
+        [IfStmt (BoolExpr false) [] (Some [ExprStmt (BoolExpr true)])]);
+    assert "while body"
+      (parsesAs "while (false) { x = 1; }"
+        [WhileStmt (BoolExpr false) [ExprStmt (AssignExpr "x" (NumberExpr 1.0))]]);
+    assert "record as statement needs parentheses"
+      (parsesAs "({ x: 1 });"
+        [ExprStmt (RecordExpr [{name = "x", expr = NumberExpr 1.0}])]);
+    outputLnIO "PASS: 2b program and statement grammar"
+  };
+
+let testTypes: IO Unit =
+  do (bindIO) {
+    assert "primitive type number"
+      (typeParsesAs "number" NumberType);
+    assert "primitive type boolean"
+      (typeParsesAs "boolean" BoolType);
+    assert "zero-argument function type"
+      (typeParsesAs "() => string" (FunctionType [] StringType));
+    assert "two-argument function type"
+      (typeParsesAs "(x: number, y: boolean) => null"
+        (FunctionType [NumberType, BoolType] NullType));
+    assert "record type with trailing semicolon"
+      (typeParsesAs "{ name: string; year: number; }"
+        (RecordType [
+          {name = "name", typ = StringType},
+          {name = "year", typ = NumberType}
+        ]));
+    assert "record type without trailing semicolon"
+      (typeParsesAs "{ name: string }"
+        (RecordType [{name = "name", typ = StringType}]));
+    assert "empty record type"
+      (typeParsesAs "{}" (RecordType []));
+    assert "nested higher-order function type"
+      (typeParsesAs "(f: (x: number) => number) => number"
+        (FunctionType [FunctionType [NumberType] NumberType] NumberType));
+    outputLnIO "PASS: 2b type grammar"
+  };
+
+let testExpressionGrammar: IO Unit =
+  do (bindIO) {
+    assert "multiplication binds tighter than addition"
+      (exprParsesAs "1 + 2 * 3"
+        (BinOpExpr AddOp (NumberExpr 1.0)
+          (BinOpExpr MulOp (NumberExpr 2.0) (NumberExpr 3.0))));
+    assert "subtraction left associative"
+      (exprParsesAs "10 - 3 - 2"
+        (BinOpExpr SubOp
+          (BinOpExpr SubOp (NumberExpr 10.0) (NumberExpr 3.0))
+          (NumberExpr 2.0)));
+    assert "assignment right associative"
+      (exprParsesAs "a = b = 5"
+        (AssignExpr "a" (AssignExpr "b" (NumberExpr 5.0))));
+    assert "equality not mistaken for assignment"
+      (exprParsesAs "x === 10"
+        (BinOpExpr EqOp (VarExpr "x") (NumberExpr 10.0)));
+    assert "comparison longest operator"
+      (exprParsesAs "x <= 10"
+        (BinOpExpr LeOp (VarExpr "x") (NumberExpr 10.0)));
+    assert "not-equals longest operator"
+      (exprParsesAs "x !== 10"
+        (BinOpExpr NeqOp (VarExpr "x") (NumberExpr 10.0)));
+    assert "Boolean precedence"
+      (exprParsesAs "a || b && c"
+        (BinOpExpr OrOp (VarExpr "a")
+          (BinOpExpr AndOp (VarExpr "b") (VarExpr "c"))));
+    assert "unary and parentheses"
+      (exprParsesAs "-(x + 1)"
+        (UnaryOpExpr NegOp
+          (BinOpExpr AddOp (VarExpr "x") (NumberExpr 1.0))));
+    assert "parenthesized expression backtracking"
+      (exprParsesAs "(x)" (VarExpr "x"));
+    assert "record expression preserves field order"
+      (exprParsesAs "{ a: 1, b: true }"
+        (RecordExpr [
+          {name = "a", expr = NumberExpr 1.0},
+          {name = "b", expr = BoolExpr true}
+        ]));
+    assert "postfix source order f(1).x"
+      (exprParsesAs "f(1).x"
+        (FieldExpr (AppExpr (VarExpr "f") [NumberExpr 1.0]) "x"));
+    assert "nested function calls"
+      (exprParsesAs "f(1)(2)"
+        (AppExpr (AppExpr (VarExpr "f") [NumberExpr 1.0]) [NumberExpr 2.0]));
+    assert "arrow function expression"
+      (exprParsesAs "(x: number): number => x + 1"
+        (FnExpr [{name = "x", typ = NumberType}] NumberType
+          (BinOpExpr AddOp (VarExpr "x") (NumberExpr 1.0))));
+    assert "parenthesized arrow returning a record"
+      (exprParsesAs "(): { x: number; } => ({ x: 1 })"
+        (FnExpr [] (RecordType [{name = "x", typ = NumberType}])
+          (RecordExpr [{name = "x", expr = NumberExpr 1.0}])));
+    outputLnIO "PASS: 2b expressions, associativity, precedence, postfix"
+  };
+
+let testRejectedSyntax: IO Unit =
+  do (bindIO) {
+    assert "incomplete declaration" (failsParse "let x = ;");
+    assert "no initializer" (failsParse "let x;");
+    assert "no semicolon" (failsParse "let x = 1");
+    assert "extra garbage after program" (failsParse "let x = 1; ???");
+    assert "invalid identifier" (failsParse "let 2x = 1;");
+    assert "reserved field" (failsParse "let x = { if: 1 };");
+    assert "unknown escape" (failsParse "let s = \"\\q\";");
+    assert "unterminated string" (failsParse "let s = \"hello;");
+    assert "invalid arrow missing type" (failsParse "let f = (x) => x;");
+    assert "unparenthesized returned record" (failsParse "let f = (): { x: number; } => {x: 1};");
+    assert "invalid record assignment" (failsParse "x.y = 1;");
+    assert "trailing comma in arguments" (failsParse "f(1,);");
+    assert "trailing comma in records" (failsParse "let r = { x: 1, }; ");
+    assert "bare record expression statement requires parentheses"
+      (failsParse "{ x: 1 };");
+    assert "trailing comma in parameter list" (failsParse "let f = (x: number,): number => x;");
+    assert "stray unmatched close brace" (failsParse "}");
+    assert "duplicate function type parameter names"
+      (failsParse "let f: (x: number, x: string) => number = null;");
+    outputLnIO "PASS: 2b/2c malformed syntax"
+  };
+
+let testOfficialExamples: IO Unit =
+  do (bindIO) {
+    assert "official factorial program parses"
+      (match parse "let n: number = 5; let result = 1; while (n > 1) { result = result * n; n = n - 1; }" {
+        Ok _ => true;
+        Err _ => false;
+      });
+    assert "official counter closure parses"
+      (match parse "let counter = 0; let next = (): number => (counter = counter + 1); let a = next(); let b = next();" {
+        Ok _ => true;
+        Err _ => false;
+      });
+    assert "official higher-order function parses"
+      (match parse "let makeAdder = (n: number): (x: number) => number => (x: number): number => x + n; let addFive = makeAdder(5); let result = addFive(10);" {
+        Ok _ => true;
+        Err _ => false;
+      });
+    assert "official record example parses"
+      (match parse "let student = { name: \"Alice\", year: 2026 }; let name = student.name; let nextYear = student.year + 1;" {
+        Ok _ => true;
+        Err _ => false;
+      });
+    outputLnIO "PASS: 2b official specification examples"
+  };
+
+let main: IO Unit =
+  do (bindIO) {
+    testProgramGrammar;
+    testTypes;
+    testExpressionGrammar;
+    testRejectedSyntax;
+    testOfficialExamples;
+    outputLnIO "PASS: All Item 2b/2c parser tests"
+  };

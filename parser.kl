@@ -148,7 +148,7 @@ let text lit =
 #[helper] reads // up to the end of the line or input
 let lineComment =
   andThen (text "//") (fn ignored =>
-    andThen (many (satisfy (fn c => c != "\n") "comment text")) (fn ignored2 =>
+    andThen (many (satisfy (fn c => c != "\n" && c != "\r") "comment text")) (fn ignored2 =>
       pureP unit));
 
 #[helper] reads one whitespace character
@@ -346,4 +346,309 @@ letrec hasDuplicate names =
         true
       else
         hasDuplicate rest;
+  };
+
+#item 2c: parser combinators for putting smaller parsers together
+
+#[helper] parses one or more values with a separator in between
+let sepBy1 p separator =
+  andThen p (fn first =>
+    andThen (many (keepRight separator p)) (fn rest =>
+      pureP (first :: rest)));
+
+#[helper] same as sepBy1 but also allows an empty list
+let sepBy p separator =
+  orElse (sepBy1 p separator) (pureP []);
+
+#[helper] checks if we have reached the end of the source
+let endOfInput =
+  fn st =>
+    match peekChar st {
+      None => Ok {value = unit, state = st};
+      Some ignored => Err (errorAt st "expected end of input");
+    };
+
+#[helper] returns a parse error with the given message
+let failP message =
+  fn st => Err (errorAt st message);
+
+#[helper] groups repeated operators from left to right
+#e.g. a - b - c becomes (a - b) - c
+let chainLeft1 operand op =
+  andThen operand (fn first =>
+    andThen (many (andThen op (fn combine =>
+      mapP (fn rhs => {combine = combine, rhs = rhs}) operand)))
+      (fn rest =>
+        pureP (foldLeft
+          (fn lhs item => item.combine lhs item.rhs)
+          first rest)));
+
+#[helper] parses p between ( and )
+let parenthesized p =
+  keepRight (symbol "(") (keepLeft p (symbol ")"));
+
+#item 2b: parsing MiniTS types
+
+#[helper] parses number, boolean, string, or null as a type
+let primitiveType =
+  orElse (mapP (fn _ => NumberType) (keyword "number"))
+    (orElse (mapP (fn _ => BoolType) (keyword "boolean"))
+      (orElse (mapP (fn _ => StringType) (keyword "string"))
+        (mapP (fn _ => NullType) (keyword "null"))));
+
+#[helper] reads a parameter name and its type for a function type
+let typeParameter parseType =
+  andThen identifier (fn name =>
+    keepRight (symbol ":")
+      (mapP (fn typ => {name = name, typ = typ}) parseType));
+
+#[helper] reads a record field name and its type
+let typeField parseType =
+  andThen identifier (fn name =>
+    keepRight (symbol ":")
+      (mapP (fn typ => {name = name, typ = typ}) parseType));
+
+#[helper] parses (x: number) => number as a function type
+#checks for repeated parameter names before keeping just their types
+let functionTypeParser parseType =
+  andThen (parenthesized (sepBy (typeParameter parseType) (symbol ",")))
+    (fn params =>
+      if hasDuplicate (map (fn param => param.name) params) then
+        failP "duplicate function type parameter name"
+      else
+        keepRight (symbol "=>")
+          (mapP (fn ret =>
+            FunctionType (map (fn param => param.typ) params) ret)
+            parseType));
+
+#[helper] parses record types; the last semicolon is optional
+let recordTypeParser parseType =
+  keepRight (symbol "{")
+    (keepLeft
+      (andThen (sepBy (typeField parseType) (symbol ";")) (fn fields =>
+        keepRight (optional (symbol ";")) (pureP (RecordType fields))))
+      (symbol "}"));
+
+#parses all supported types
+#the parser is called with st so recursion only happens when there is input to parse
+letrec typeParser st =
+  (orElse primitiveType
+    (orElse (functionTypeParser typeParser)
+      (recordTypeParser typeParser))) st;
+
+#parsing functions and records
+
+#[helper] parses a function parameter with its required type
+let valueParameter =
+  andThen identifier (fn name =>
+    keepRight (symbol ":")
+      (mapP (fn typ => {name = name, typ = typ}) typeParser));
+
+#[helper] parses a record field name and its expression
+let recordField parseExpr =
+  andThen identifier (fn name =>
+    keepRight (symbol ":")
+      (mapP (fn expr => {name = name, expr = expr}) parseExpr));
+
+#[helper] parses { ... } with comma-separated fields
+let recordExpression parseExpr =
+  keepRight (symbol "{")
+    (keepLeft
+      (mapP RecordExpr (sepBy (recordField parseExpr) (symbol ",")))
+      (symbol "}"));
+
+#[helper] reads the expression after =>
+#if the body is a record, it needs parentheses: => ({ x: 1 })
+let arrowBody parseExpr =
+  fn st =>
+    match peekChar st {
+      Some c =>
+        if c == "{" then
+          Err (errorAt st "parenthesize a record literal returned by an arrow function")
+        else
+          parseExpr st;
+      None => parseExpr st;
+    };
+
+#[helper] parses the parameters, return type, and body of an arrow function
+let arrowFunction parseExpr =
+  andThen (parenthesized (sepBy valueParameter (symbol ",")))
+    (fn params =>
+      keepRight (symbol ":")
+        (andThen typeParser (fn ret =>
+          keepRight (symbol "=>")
+            (mapP (fn body => FnExpr params ret body)
+              (arrowBody parseExpr)))));
+
+#[helper] parses functions, literals, variables, grouped expressions, or records
+let primaryExpression parseExpr =
+  orElse (arrowFunction parseExpr)
+    (orElse (mapP NumberExpr numberLiteral)
+      (orElse (mapP StringExpr stringLiteral)
+        (orElse (mapP (fn _ => BoolExpr true) (keyword "true"))
+          (orElse (mapP (fn _ => BoolExpr false) (keyword "false"))
+            (orElse (mapP (fn _ => NullExpr) (keyword "null"))
+              (orElse (mapP VarExpr identifier)
+                (orElse (parenthesized parseExpr)
+                  (recordExpression parseExpr))))))));
+
+#parsing function calls, field access, and operators
+
+#[helper] reads (args) and turns the preceding expression into a function call
+let callSuffix parseExpr =
+  mapP (fn args => fn target => AppExpr target args)
+    (parenthesized (sepBy parseExpr (symbol ",")));
+
+#[helper] reads .field and adds field access to the preceding expression
+let fieldSuffix =
+  mapP (fn field => fn target => FieldExpr target field)
+    (keepRight (symbol ".") identifier);
+
+#[helper] applies calls and field access in the order they appear
+#e.g. f(1).x means get x from the result of f(1)
+let postfixExpression parseExpr =
+  andThen (primaryExpression parseExpr) (fn first =>
+    andThen (many (orElse (callSuffix parseExpr) fieldSuffix))
+      (fn suffixes =>
+        pureP (foldLeft (fn expr apply => apply expr) first suffixes)));
+
+#[helper] parses ! and unary - before the expression they apply to
+letrec unaryExpression parseExpr st =
+  (orElse
+    (andThen
+      (orElse (mapP (fn _ => NotOp) (symbolExcept "!" ["="]))
+        (mapP (fn _ => NegOp) (symbol "-")))
+      (fn op =>
+        mapP (fn operand => UnaryOpExpr op operand)
+          (unaryExpression parseExpr)))
+    (postfixExpression parseExpr)) st;
+
+#[helper] creates a binary operation using the given symbol and AST operator
+let binaryOperator spelling constructor =
+  mapP (fn _ => fn left => fn right => BinOpExpr constructor left right)
+    (symbol spelling);
+
+#[helper] parses * and / before lower-priority operators
+let multiplicationExpression parseExpr =
+  chainLeft1 (unaryExpression parseExpr)
+    (orElse (binaryOperator "*" MulOp)
+      (binaryOperator "/" DivOp));
+
+#[helper] parses + and - after multiplication and division
+let additionExpression parseExpr =
+  chainLeft1 (multiplicationExpression parseExpr)
+    (orElse (binaryOperator "+" AddOp)
+      (binaryOperator "-" SubOp));
+
+#[helper] parses <, <=, >, and >= comparisons
+let comparisonExpression parseExpr =
+  chainLeft1 (additionExpression parseExpr)
+    (orElse (binaryOperator "<=" LeOp)
+      (orElse (binaryOperator ">=" GeOp)
+        (orElse
+          (mapP (fn _ => fn left => fn right => BinOpExpr LtOp left right)
+            (symbolExcept "<" ["="]))
+          (mapP (fn _ => fn left => fn right => BinOpExpr GtOp left right)
+            (symbolExcept ">" ["="])))));
+
+#[helper] parses === and !== comparisons
+let equalityExpression parseExpr =
+  chainLeft1 (comparisonExpression parseExpr)
+    (orElse (binaryOperator "===" EqOp)
+      (binaryOperator "!==" NeqOp));
+
+#[helper] parses expressions joined by &&
+let logicalAndExpression parseExpr =
+  chainLeft1 (equalityExpression parseExpr)
+    (binaryOperator "&&" AndOp);
+
+#[helper] parses expressions joined by ||
+let logicalOrExpression parseExpr =
+  chainLeft1 (logicalAndExpression parseExpr)
+    (binaryOperator "||" OrOp);
+
+#[helper] parses variable assignments with =
+#makes sure = is not mistaken for === or =>
+let assignmentExpression parseExpr =
+  andThen identifier (fn name =>
+    keepRight (symbolExcept "=" ["=", ">"])
+      (mapP (fn rhs => AssignExpr name rhs) parseExpr));
+
+#parses a MiniTS expression, trying assignment first
+#if it is not an assignment, try the other operators instead
+letrec expressionParser st =
+  (orElse (assignmentExpression expressionParser)
+    (logicalOrExpression expressionParser)) st;
+
+#parsing statements and the whole program
+
+#[helper] parses statements inside { and }
+let blockParser parseStatement =
+  keepRight (symbol "{")
+    (keepLeft (many parseStatement) (symbol "}"));
+
+#[helper] parses let declarations with an optional type but a required value
+let letStatement parseExpr =
+  keepRight (keyword "let")
+    (andThen identifier (fn name =>
+      andThen (optional (keepRight (symbol ":") typeParser))
+        (fn ann =>
+          keepRight (symbolExcept "=" ["=", ">"])
+            (andThen parseExpr (fn expr =>
+              keepRight (symbol ";")
+                (pureP (LetStmt name ann expr)))))));
+
+#[helper] parses if blocks and their optional else blocks
+let ifStatement parseExpr parseStatement =
+  keepRight (keyword "if")
+    (andThen (parenthesized parseExpr) (fn condition =>
+      andThen (blockParser parseStatement) (fn thenBlock =>
+        andThen
+          (optional (keepRight (keyword "else")
+            (blockParser parseStatement)))
+          (fn elseBlock =>
+            pureP (IfStmt condition thenBlock elseBlock)))));
+
+#[helper] parses a while condition and its block
+let whileStatement parseExpr parseStatement =
+  keepRight (keyword "while")
+    (andThen (parenthesized parseExpr) (fn condition =>
+      mapP (fn body => WhileStmt condition body)
+        (blockParser parseStatement)));
+
+#[helper] parses an expression followed by ;
+let expressionStatement parseExpr =
+  andThen parseExpr (fn expr =>
+    keepRight (symbol ";") (pureP (ExprStmt expr)));
+
+#parses a statement, starting with blocks, declarations, if, and while
+#a leading { is treated as a block; use ({ x: 1 }); for a record expression
+letrec statementParser st =
+  match peekChar st {
+    Some c =>
+      if c == "{" then
+        (mapP BlockStmt (blockParser statementParser)) st
+      else
+        (orElse (letStatement expressionParser)
+          (orElse (ifStatement expressionParser statementParser)
+            (orElse (whileStatement expressionParser statementParser)
+              (expressionStatement expressionParser)))) st;
+    None =>
+      (orElse (letStatement expressionParser)
+        (orElse (ifStatement expressionParser statementParser)
+          (orElse (whileStatement expressionParser statementParser)
+            (expressionStatement expressionParser)))) st;
+  };
+
+#parses all statements, skips spaces/comments, then checks for extra input
+let programParser =
+  keepRight skipSpace
+    (keepLeft (many statementParser)
+      (keepRight skipSpace endOfInput));
+
+#main parser: source code -> AST, or ParseError if parsing fails
+let parse source =
+  match runParser programParser source {
+    Ok r => Ok r.value;
+    Err e => Err e;
   };
