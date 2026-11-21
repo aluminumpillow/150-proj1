@@ -1,0 +1,170 @@
+include "parser.kl";
+
+# p succeeded with this value and stopped at this index
+let reads p source expected endIndex =
+  match runParser p source {
+    Ok r => r.value == expected && r.state.index == endIndex;
+    Err ignored => false;
+  };
+
+# p succeeded and stopped at this index (value not checked)
+let endsAt p source endIndex =
+  match runParser p source {
+    Ok r => r.state.index == endIndex;
+    Err ignored => false;
+  };
+
+# p failed
+let rejects p source =
+  match runParser p source {
+    Ok ignored => false;
+    Err ignored => true;
+  };
+
+# p failed with exactly this message
+let failsWith p source expectedMessage =
+  match runParser p source {
+    Ok ignored => false;
+    Err e => e.message == expectedMessage;
+  };
+
+letrec repeatText s n =
+  if n <= 0 then "" else str_concat s (repeatText s (n - 1));
+
+# p succeeded with this value and stopped at this index
+let reads p source expected endIndex =
+  match runParser p source {
+    Ok r => r.value == expected && r.state.index == endIndex;
+    Err ignored => false;
+  };
+
+# p succeeded and stopped at this index (value not checked)
+let endsAt p source endIndex =
+  match runParser p source {
+    Ok r => r.state.index == endIndex;
+    Err ignored => false;
+  };
+
+# p failed
+let rejects p source =
+  match runParser p source {
+    Ok ignored => false;
+    Err ignored => true;
+  };
+
+# p failed with exactly this message
+let failsWith p source expectedMessage =
+  match runParser p source {
+    Ok ignored => false;
+    Err e => e.message == expectedMessage;
+  };
+
+letrec repeatText s n =
+  if n <= 0 then "" else str_concat s (repeatText s (n - 1));
+
+let testReserved: IO Unit =
+  do (bindIO) {
+    assert "reserved: let" (isReserved "let");
+    assert "reserved: string" (isReserved "string");
+    assert "reserved: letter is not" (not (isReserved "letter"));
+    assert "reserved: x is not" (not (isReserved "x"));
+    assert "reserved: case-sensitive" (not (isReserved "Let"));
+    outputLnIO "✅ reserved words"
+  };
+
+let testNumber: IO Unit =
+  do (bindIO) {
+    assert "number: integer" (reads numberLiteral "42" 42.0 2);
+    assert "number: zero" (reads numberLiteral "0" 0.0 1);
+    assert "number: fraction" (reads numberLiteral "3.25" 3.25 4);
+    assert "number: dot without digits stops before dot" (reads numberLiteral "1.x" 1.0 1);
+    assert "number: leading dot is not a number" (rejects numberLiteral ".5");
+    assert "number: minus is not part of literal" (rejects numberLiteral "-1");
+    assert "number: skips trailing comment" (reads numberLiteral "7 // seven\n" 7.0 11);
+    assert "number: rejects non-finite"
+      (failsWith numberLiteral (repeatText "9" 400) "number literal must be finite");
+    outputLnIO "✅ number literals"
+  };
+
+let testIdentifier: IO Unit =
+  do (bindIO) {
+    assert "identifier: simple" (reads identifier "foo" "foo" 3);
+    assert "identifier: underscore start" (reads identifier "_x1" "_x1" 3);
+    assert "identifier: stops at punctuation" (reads identifier "f(x)" "f" 1);
+    assert "identifier: skips trailing space" (reads identifier "foo  bar" "foo" 5);
+    assert "identifier: keyword prefix is fine" (reads identifier "letter" "letter" 6);
+    assert "identifier: cannot start with digit" (rejects identifier "1abc");
+    assert "identifier: rejects let"
+      (failsWith identifier "let" "reserved word cannot be an identifier: let");
+    assert "identifier: rejects string" (rejects identifier "string");
+    outputLnIO "✅ identifiers"
+  };
+
+let testString: IO Unit =
+  do (bindIO) {
+    assert "string: simple" (reads stringLiteral "\"hi\"" "hi" 4);
+    assert "string: empty" (reads stringLiteral "\"\"" "" 2);
+    assert "string: skips trailing space" (reads stringLiteral "\"a\" ;" "a" 4);
+    assert "string: escaped quote" (reads stringLiteral "\"a\\\"b\"" "a\"b" 6);
+    assert "string: escaped backslash" (reads stringLiteral "\"a\\\\b\"" "a\\b" 6);
+    assert "string: escaped n r t" (reads stringLiteral "\"\\n\\r\\t\"" "\n\r\t" 8);
+    assert "string: // inside is text" (reads stringLiteral "\"//x\"" "//x" 5);
+    assert "string: unknown escape" (failsWith stringLiteral "\"\\q\"" "unknown escape \\q");
+    assert "string: unterminated" (failsWith stringLiteral "\"abc" "unterminated string");
+    assert "string: ends after backslash" (failsWith stringLiteral "\"abc\\" "unterminated string");
+    assert "string: raw line break"
+      (failsWith stringLiteral "\"a\nb\"" "unescaped line break in string");
+    outputLnIO "✅ strings"
+  };
+
+let testSkipSpace: IO Unit =
+  do (bindIO) {
+    assert "skip: nothing" (endsAt skipSpace "x" 0);
+    assert "skip: spaces, tabs, line breaks" (endsAt skipSpace " \t\r\n x" 5);
+    assert "skip: comment then code" (endsAt skipSpace "// hi\nx" 6);
+    assert "skip: comment at end of input" (endsAt skipSpace "  // only" 9);
+    assert "skip: several comments" (endsAt skipSpace "// a\n  // b\nx" 12);
+    assert "skip: single / is not a comment" (endsAt skipSpace "/ x" 0);
+    outputLnIO "✅ whitespace and comments"
+  };
+let testKeywordsAndOperators: IO Unit =
+  do (bindIO) {
+    assert "keyword: matches" (endsAt (keyword "let") "let x" 4);
+    assert "keyword: at end of input" (endsAt (keyword "else") "else" 4);
+    assert "keyword: followed by punctuation" (endsAt (keyword "if") "if(" 2);
+    assert "keyword: needs boundary" (rejects (keyword "let") "letter");
+    assert "keyword: digit counts as identifier char" (rejects (keyword "if") "if2");
+    assert "keyword: underscore counts as identifier char" (rejects (keyword "while") "while_");
+    assert "symbol: ===" (endsAt (symbol "===") "=== x" 4);
+    assert "symbol: =>" (endsAt (symbol "=>") "=>x" 2);
+    assert "symbol: spaces cannot split ===" (rejects (symbol "===") "= ==");
+    assert "assign =: alone" (endsAt (symbolExcept "=" ["=", ">"]) "= 1" 2);
+    assert "assign =: not start of ===" (rejects (symbolExcept "=" ["=", ">"]) "=== 1");
+    assert "assign =: not start of =>" (rejects (symbolExcept "=" ["=", ">"]) "=> 1");
+    assert "<: alone" (endsAt (symbolExcept "<" ["="]) "< 1" 2);
+    assert "<: not start of <=" (rejects (symbolExcept "<" ["="]) "<= 1");
+    assert ">: not start of >=" (rejects (symbolExcept ">" ["="]) ">= 1");
+    assert "!: alone" (endsAt (symbolExcept "!" ["="]) "!x" 1);
+    assert "!: not start of !==" (rejects (symbolExcept "!" ["="]) "!== x");
+    outputLnIO "✅ keywords and operators"
+  };
+
+let testHasDuplicate: IO Unit =
+  do (bindIO) {
+    assert "hasDuplicate: none" (not (hasDuplicate ["x", "y", "z"]));
+    assert "hasDuplicate: found" (hasDuplicate ["x", "y", "x"]);
+    assert "hasDuplicate: empty" (not (hasDuplicate []));
+    outputLnIO "✅ hasDuplicate"
+  };
+
+let main: IO Unit =
+  do (bindIO) {
+    testReserved;
+    testNumber;
+    testIdentifier;
+    testString;
+    testSkipSpace;
+    testKeywordsAndOperators;
+    testHasDuplicate;
+    outputLnIO "✅ All 2a tests passing"
+  };

@@ -2,29 +2,37 @@ include "common.kl";
 include "syntax.kl";
 
 #reserving certain words from being used as identifiers, parameter names, or field names
+
+#[helper] list of the 10 reserved words
 let reservedWords =
   ["let", "if", "else", "while", "true", "false", "null",
    "number", "boolean", "string"];
 
+#[helper] true if value is in the list xs
 let containsString xs value =
   foldLeft (fn found x => found || x == value) false xs;
 
+#[helper] true if name is one of the reserved words
 let isReserved name =
   containsString reservedWords name;
 
-#ensuring a number [0-9]+(\.[0-9]+)? and that a leading minus is a separate unary operator
-
+#[helper] error type: where parsing failed and why
 type alias ParseError = {index: Int, message: String};
 
+#[helper] starting state: whole source, index 0
 let initialState source = {src = source, index = 0};
 
+#[helper] runs parser p on a source string
 let runParser p source = p (initialState source);
 
+#[helper] builds an error at the current index
 let errorAt st message = {index = st.index, message = message};
 
+#[helper] succeeds with value without reading anything
 let pureP value =
   fn st => Ok {value = value, state = st};
 
+#[helper] runs p, then the parser chosen by next using p's result
 let andThen p next =
   fn st =>
     match p st {
@@ -32,15 +40,19 @@ let andThen p next =
       Ok r => (next r.value) r.state;
     };
 
+#[helper] runs p and transforms its result with f
 let mapP f p =
   andThen p (fn x => pureP (f x));
 
+#[helper] runs p then q, keeps q's result
 let keepRight p q =
   andThen p (fn ignored => q);
 
+#[helper] picks the error that got further into the input
 let fartherError e1 e2 =
   if e2.index >= e1.index then e2 else e1;
 
+#[helper] tries p; if it fails, tries q from the same spot (backtracking)
 let orElse p q =
   fn st =>
     match p st {
@@ -52,14 +64,17 @@ let orElse p q =
         };
     };
 
+#[helper] current character without consuming it (None at end)
 let peekChar st =
   if st.index < str_len st.src then
     Some (str_at st.src st.index)
   else
     None;
 
+#[helper] moves the index forward n characters
 let advance st n = { src = st.src, index = st.index + n };
 
+#[helper] reads one character if test accepts it
 let satisfy test label =
   fn st =>
     match peekChar st {
@@ -73,9 +88,11 @@ let satisfy test label =
           Err (errorAt st (str_concat "expected " label));
     };
 
+#[helper] reads exactly the character c
 let charP c =
   satisfy (fn d => d == c) (str_concat "'" (str_concat c "'"));
 
+#[helper] zero or more p; stops if p consumes nothing
 letrec many p =
   fn st =>
     match p st {
@@ -92,32 +109,109 @@ letrec many p =
           };
     };
 
+#[helper] one or more p
 let many1 p =
   andThen p (fn first =>
     andThen (many p) (fn rest =>
       pureP (first :: rest)));
 
+#[helper] Some result if p matches, otherwise None
 let optional p =
   orElse (mapP (fn x => Some x) p) (pureP None);
 
+#skip spaces, tabs, line breaks, and // comments between tokens
+
+#[helper] runs p1 then p2, keeps p1's result
+#p1 = first parser, p2 = second parser
+let keepLeft p1 p2 =
+  andThen p1 (fn x =>
+    andThen p2 (fn ignored =>
+      pureP x));
+
+#[helper] true for space, tab, \n, \r
+let isSpaceChar c =
+  c == " " || c == "\t" || c == "\n" || c == "\r";
+
+#[helper] reads exactly the text lit
+# lit as in literal/literally lol
+let text lit =
+  fn st =>
+    let n = str_len lit in
+    let err = Err (errorAt st (str_concat "expected \"" (str_concat lit "\""))) in
+    if st.index + n > str_len st.src then
+      err
+    else if str_slice st.src st.index (st.index + n) == lit then
+      Ok { value = lit, state = advance st n }
+    else
+      err;
+
+#[helper] reads // up to the end of the line or input
+let lineComment =
+  andThen (text "//") (fn ignored =>
+    andThen (many (satisfy (fn c => c != "\n") "comment text")) (fn ignored2 =>
+      pureP unit));
+
+#[helper] reads one whitespace character
+let whitespaceChar =
+  mapP (fn ignored => unit) (satisfy isSpaceChar "whitespace");
+
+#skips any whitespace and // comments (possibly none)
+let skipSpace =
+  mapP (fn ignored => unit) (many (orElse whitespaceChar lineComment));
+
+#runs a token parser, then skips whitespace/comments after it
+let lexeme p =
+  keepLeft p skipSpace;
+
+#ensuring a number [0-9]+(\.[0-9]+)? and that a leading minus is a separate unary operator
+
+#[helper] true for 0-9
 let isDigit c =
   let o = str_ord c in
   o >= 48 && o <= 57;
 
+#[helper] reads one or more digits as a string
 let digits1 =
   mapP str_join (many1 (satisfy isDigit "digit"));
 
+#[helper] removes leading zeros from a digit string
+#s = string of digits; removes leading zeros but keeps at least one digit
+letrec stripLeadingZeros s =
+  if str_len s <= 1 then
+    s
+  else if str_at s 0 == "0" then
+    stripLeadingZeros (str_slice s 1 (str_len s))
+  else
+    s;
+
+#[helper] reads [0-9]+(\.[0-9]+)? as text
+#numberText returns the whole-number digits separately so their size can be checked,
+#and full = normalized text string_to_float accepts (no leading zeros, always has a ".")
 let numberText =
   andThen digits1 (fn whole =>
     andThen (optional (keepRight (charP ".") digits1)) (fn fraction =>
+      let w = stripLeadingZeros whole in
       match fraction {
-        None => pureP whole;
-        Some f => pureP (str_concat whole (str_concat "." f));
+        None => pureP { whole = w, full = str_concat w ".0" };
+        Some f => pureP { whole = w, full = str_concat w (str_concat "." f) };
       }));
 
-let isFinite x =
-  x -. x == 0.0;
+#[helper] digits of the largest finite float
+#digits of the largest finite float (309 digits)
+let maxFloatDigits =
+  "179769313486231570814527423731704356798070567525844996598917476803157260780028538760589558632766878171540458953514382464234321326889464182768467546703537516986049910576551282076245490090389328944075868508455133942304583236903222948165808559332123348274797826204144723168738177180919299881250404026184124858368";
 
+#[helper] true if the whole-number digits fit in a finite float
+#whole = digits before the dot (already stripped); true if the number fits in a finite float
+let isFiniteWhole whole =
+  if str_len whole < str_len maxFloatDigits then
+    true
+  else if str_len whole > str_len maxFloatDigits then
+    false
+  else
+    str_compare whole maxFloatDigits <= 0;
+
+#parses a number literal into a Float, rejects non-finite, skips trailing space
 let numberLiteral =
   lexeme
     (fn st =>
@@ -125,31 +219,35 @@ let numberLiteral =
         Err e => Err e;
 
         Ok r =>
-          let value = string_to_float r.value in
-          if isFinite value then
-            Ok { value = value, state = r.state }
+          if isFiniteWhole r.value.whole then
+            Ok { value = string_to_float r.value.full, state = r.state }
           else
             Err (errorAt st "number literal must be finite");
       });
 
 #identifier: [A-Za-z_][A-Za-z0-9_]* and not a reserved word
 
+#[helper] true for A-Z or a-z
 #code = character code of c (65-90 = A-Z, 97-122 = a-z)
 let isLetter c =
   let code = str_ord c in
   (code >= 65 && code <= 90) || (code >= 97 && code <= 122);
 
+#[helper] true for a valid first identifier character
 let isIdentStart c =
   isLetter c || c == "_";
 
+#[helper] true for a valid later identifier character
 let isIdentChar c =
   isIdentStart c || isDigit c;
 
+#[helper] reads [A-Za-z_][A-Za-z0-9_]* without the reserved check
 let rawIdentifier =
   andThen (satisfy isIdentStart "identifier") (fn first =>
     andThen (many (satisfy isIdentChar "identifier character")) (fn rest =>
       pureP (str_join (first :: rest))));
 
+#parses an identifier ([A-Za-z_][A-Za-z0-9_]*), rejects reserved words, skips trailing space
 let identifier =
   lexeme
     (fn st =>
@@ -165,6 +263,7 @@ let identifier =
 
 #strings: "..." with \" \\ \n \r \t escapes; reject unknown escapes, raw line breaks, unterminated strings
 
+#[helper] maps the character after \ to what it stands for
 #c = the character after a backslash
 let escapeValue c =
   if c == "\"" then Some "\""
@@ -174,6 +273,7 @@ let escapeValue c =
   else if c == "t" then Some "\t"
   else None;
 
+#[helper] reads string contents up to the closing quote
 #acc = decoded text so far, decoded = the character an escape stands for
 letrec stringBody st acc =
   match peekChar st {
@@ -200,50 +300,15 @@ letrec stringBody st acc =
         stringBody (advance st 1) (str_concat acc c);
   };
 
+#parses a "..." string literal into its decoded text, skips trailing space
 let stringLiteral =
   lexeme
     (andThen (charP "\"") (fn ignored =>
       fn st => stringBody st ""));
 
-#skip spaces, tabs, line breaks, and // comments between tokens
-
-#p1 = first parser, p2 = second parser
-let keepLeft p1 p2 =
-  andThen p1 (fn x =>
-    andThen p2 (fn ignored =>
-      pureP x));
-
-let isSpaceChar c =
-  c == " " || c == "\t" || c == "\n" || c == "\r";
-
-# lit as in literal/literally lol
-let text lit =
-  fn st =>
-    let n = str_len lit in
-    let err = Err (errorAt st (str_concat "expected \"" (str_concat lit "\""))) in
-    if st.index + n > str_len st.src then
-      err
-    else if str_slice st.src st.index (st.index + n) == lit then
-      Ok { value = lit, state = advance st n }
-    else
-      err;
-
-let lineComment =
-  andThen (text "//") (fn ignored =>
-    andThen (many (satisfy (fn c => c != "\n") "comment text")) (fn ignored2 =>
-      pureP unit));
-
-let whitespaceChar =
-  mapP (fn ignored => unit) (satisfy isSpaceChar "whitespace");
-
-let skipSpace =
-  mapP (fn ignored => unit) (many (orElse whitespaceChar lineComment));
-
-let lexeme p =
-  keepLeft p skipSpace;
-
 #boundaries for keywords and for operators to match their longest spelling
 
+#[helper] succeeds without consuming only if p would fail here
 let notFollowedBy p label =
   fn st =>
     match p st {
@@ -251,6 +316,7 @@ let notFollowedBy p label =
       Err ignored => Ok { value = unit, state = st };
     };
 
+#parses a keyword that is not followed by an identifier character
 let keyword word =
   lexeme
     (keepLeft
@@ -258,9 +324,11 @@ let keyword word =
       (notFollowedBy (satisfy isIdentChar "identifier character")
         (str_concat "identifier character after keyword " word)));
 
+#parses exact operator/punctuation text
 let symbol s =
   lexeme (text s);
 
+#parses a short operator only if it is not the start of a longer one
 let symbolExcept s nextChars =
   lexeme
     (keepLeft
@@ -268,6 +336,7 @@ let symbolExcept s nextChars =
       (notFollowedBy (satisfy (fn c => containsString nextChars c) "longer operator")
         (str_concat "longer operator starting with " s)));
 
+#[helper] true if a list of names has a duplicate
 #check if a list of names has any duplicates (can be used in 2b & for checking duplicate var names in func)
 letrec hasDuplicate names =
   match names {
