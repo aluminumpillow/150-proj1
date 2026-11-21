@@ -1,9 +1,163 @@
-type Binding = Binding String Int;
+include "common.kl";
+include "syntax.kl";
+
+type alias Location = Int;
+
+type alias EnvScope = String -> (Option Location);
+type alias Env = List EnvScope;
 
 type Value
-    = NumberVal Float
-    | BoolVal Bool
-    | StringVal String
-    | NullVal
-    | RecordVal [{name: String, value: Value}]
-    | ClosureVal [String] Expr [[Binding]];
+  = NumberVal Float
+  | BoolVal Bool
+  | StringVal String
+  | NullVal
+  | RecordVal [{name: String, val: Value}]
+  | ClosureVal [String] Expr Env;
+
+type alias Store = {
+  nextLoc: Location,
+  mem: Location -> (Option Value)
+};
+
+type alias RuntimeError = String;
+
+# emptyEnvScope : EnvScope
+let emptyEnvScope =
+  fn _ => None;
+
+# initialEnv : Env
+let initialEnv = [emptyEnvScope];
+
+# pushEnvScope : Env -> Env
+let pushEnvScope env =
+  emptyEnvScope :: env;
+
+# extendEnvScope : EnvScope -> String -> Location -> EnvScope
+let extendEnvScope scope name loc =
+  fn query =>
+    if query == name then
+      Some loc
+    else
+      scope query;
+
+# bindEnvLocal : String -> Location -> Env -> Env
+let bindEnvLocal name loc env =
+  match env {
+    scope :: rest => (extendEnvScope scope name loc) :: rest;
+    [] => [extendEnvScope emptyEnvScope name loc];
+  };
+
+# lookupEnv : String -> Env -> Result Location RuntimeError
+letrec lookupEnv name env =
+  match env {
+    [] =>
+      Err (str_concat "unbound variable: " name);
+
+    scope :: rest =>
+      match scope name {
+        Some loc => Ok loc;
+        None => lookupEnv name rest;
+      };
+  };
+
+// store operations
+let emptyStore = {
+  nextLoc = 0,
+  mem = fn _ => None
+};
+
+let alloc val store =
+  let loc = store.nextLoc in
+  let nextMem = fn query =>
+    if query == loc then
+      Some val
+    else
+      store.mem query
+  in
+    {
+      loc = loc,
+      store = {
+        nextLoc = loc + 1,
+        mem = nextMem
+      }
+    };
+
+let lookupStore loc store =
+  match store.mem loc {
+    Some val => Ok val;
+    None => Err "unallocated store location";
+  };
+
+let updateStore loc val store =
+  {
+    nextLoc = store.nextLoc,
+    mem = fn query =>
+      if query == loc then
+        Some val
+      else
+        store.mem query
+  };
+
+  # | NumberExpr Float
+  # | BoolExpr Bool
+  # | StringExpr String
+  # | NullExpr
+  # | VarExpr String
+  # | AssignExpr String Expr
+
+# evalExpr : Expr -> Env -> Store -> Result { val: Value, store: Store } RuntimeError
+letrec evalExpr expr env store =
+  match expr {
+    // E-Number
+    NumberExpr n => 
+      Ok {val = NumberVal n, store = store};
+
+    // E-String
+    StringExpr q =>
+      Ok {val = StringVal q, store = store};
+
+    // E-Bool
+    BoolExpr b =>
+      Ok {val = BoolVal b, store = store};
+
+    // E-Null
+    NullExpr =>
+      Ok {val = NullVal, store = store};
+
+    // E-Var
+    VarExpr x =>
+      // first condition: p(x) = l
+      match (lookupEnv x env) {
+        Err err => 
+          Err err;
+        Ok loc =>
+          // second condition: sigma(l) = v
+          match (lookupStore loc store) {
+            Err err =>
+              Err err;
+            Ok v =>
+              Ok {val = v, store = store}; // final value -> rightmost denominator
+          };
+      };
+
+    // E-Assign
+    AssignExpr x e =>
+      // first condition: p(x) = l
+      match (lookupEnv x env) {
+        Err err => 
+          Err err;
+        Ok loc =>
+          // second condition: recursively evaluate e under same env and store
+          match (evalExpr e env store) {
+            Err err =>
+              Err err;
+            Ok res =>
+              Ok {val = res.val, store = (updateStore loc res.val res.store)};
+          };
+        };
+      _ =>
+      Err "unimplemented expression"; // for 4c+
+    };
+  
+
+  let main = pureIO unit;
