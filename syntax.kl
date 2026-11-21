@@ -2,7 +2,6 @@ type Result t e
   = Ok t          
   | Err e; 
 
-
 type Type
   = NumberType
   | BoolType
@@ -33,7 +32,6 @@ type BinOp
   | AndOp
   | OrOp;
 
-
 type Expr
   = NumberExpr Float
   | BoolExpr Bool
@@ -47,3 +45,14 @@ type Expr
   | AppExpr Expr [Expr]
   | RecordExpr [{ name: String, expr: Expr }]
   | FieldExpr Expr String;
+
+type alias Block = [Stmt];
+
+type Stmt
+  = LetStmt String (Option Type) Expr
+  | ExprStmt Expr
+  | BlockStmt Block
+  | IfStmt Expr Block (Option Block)
+  | WhileStmt Expr Block;
+
+type alias Program = [Stmt];
