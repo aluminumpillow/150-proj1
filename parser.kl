@@ -1,0 +1,280 @@
+include "common.kl";
+include "syntax.kl";
+
+#reserving certain words from being used as identifiers, parameter names, or field names
+let reservedWords =
+  ["let", "if", "else", "while", "true", "false", "null",
+   "number", "boolean", "string"];
+
+let containsString xs value =
+  foldLeft (fn found x => found || x == value) false xs;
+
+let isReserved name =
+  containsString reservedWords name;
+
+#ensuring a number [0-9]+(\.[0-9]+)? and that a leading minus is a separate unary operator
+
+type alias ParseError = {index: Int, message: String};
+
+let initialState source = {src = source, index = 0};
+
+let runParser p source = p (initialState source);
+
+let errorAt st message = {index = st.index, message = message};
+
+let pureP value =
+  fn st => Ok {value = value, state = st};
+
+let andThen p next =
+  fn st =>
+    match p st {
+    Err e => Err e;
+      Ok r => (next r.value) r.state;
+    };
+
+let mapP f p =
+  andThen p (fn x => pureP (f x));
+
+let keepRight p q =
+  andThen p (fn ignored => q);
+
+let fartherError e1 e2 =
+  if e2.index >= e1.index then e2 else e1;
+
+let orElse p q =
+  fn st =>
+    match p st {
+      Ok r => Ok r;
+      Err e1 =>
+        match q st {
+          Ok r => Ok r;
+          Err e2 => Err (fartherError e1 e2);
+        };
+    };
+
+let peekChar st =
+  if st.index < str_len st.src then
+    Some (str_at st.src st.index)
+  else
+    None;
+
+let advance st n = { src = st.src, index = st.index + n };
+
+let satisfy test label =
+  fn st =>
+    match peekChar st {
+      None =>
+        Err (errorAt st (str_concat "expected " label));
+
+      Some c =>
+        if test c then
+          Ok { value = c, state = advance st 1 }
+        else
+          Err (errorAt st (str_concat "expected " label));
+    };
+
+let charP c =
+  satisfy (fn d => d == c) (str_concat "'" (str_concat c "'"));
+
+letrec many p =
+  fn st =>
+    match p st {
+      Err ignored =>
+        Ok { value = [], state = st };
+
+      Ok r =>
+        if r.state.index == st.index then
+          Ok { value = [], state = st }
+        else
+          match (many p) r.state {
+            Err e => Err e;
+            Ok rest => Ok { value = r.value :: rest.value, state = rest.state };
+          };
+    };
+
+let many1 p =
+  andThen p (fn first =>
+    andThen (many p) (fn rest =>
+      pureP (first :: rest)));
+
+let optional p =
+  orElse (mapP (fn x => Some x) p) (pureP None);
+
+let isDigit c =
+  let o = str_ord c in
+  o >= 48 && o <= 57;
+
+let digits1 =
+  mapP str_join (many1 (satisfy isDigit "digit"));
+
+let numberText =
+  andThen digits1 (fn whole =>
+    andThen (optional (keepRight (charP ".") digits1)) (fn fraction =>
+      match fraction {
+        None => pureP whole;
+        Some f => pureP (str_concat whole (str_concat "." f));
+      }));
+
+let isFinite x =
+  x -. x == 0.0;
+
+let numberLiteral =
+  lexeme
+    (fn st =>
+      match numberText st {
+        Err e => Err e;
+
+        Ok r =>
+          let value = string_to_float r.value in
+          if isFinite value then
+            Ok { value = value, state = r.state }
+          else
+            Err (errorAt st "number literal must be finite");
+      });
+
+#identifier: [A-Za-z_][A-Za-z0-9_]* and not a reserved word
+
+#code = character code of c (65-90 = A-Z, 97-122 = a-z)
+let isLetter c =
+  let code = str_ord c in
+  (code >= 65 && code <= 90) || (code >= 97 && code <= 122);
+
+let isIdentStart c =
+  isLetter c || c == "_";
+
+let isIdentChar c =
+  isIdentStart c || isDigit c;
+
+let rawIdentifier =
+  andThen (satisfy isIdentStart "identifier") (fn first =>
+    andThen (many (satisfy isIdentChar "identifier character")) (fn rest =>
+      pureP (str_join (first :: rest))));
+
+let identifier =
+  lexeme
+    (fn st =>
+      match rawIdentifier st {
+        Err e => Err e;
+
+        Ok r =>
+          if isReserved r.value then
+            Err (errorAt st (str_concat "reserved word cannot be an identifier: " r.value))
+          else
+            Ok r;
+      });
+
+#strings: "..." with \" \\ \n \r \t escapes; reject unknown escapes, raw line breaks, unterminated strings
+
+#c = the character after a backslash
+let escapeValue c =
+  if c == "\"" then Some "\""
+  else if c == "\\" then Some "\\"
+  else if c == "n" then Some "\n"
+  else if c == "r" then Some "\r"
+  else if c == "t" then Some "\t"
+  else None;
+
+#acc = decoded text so far, decoded = the character an escape stands for
+letrec stringBody st acc =
+  match peekChar st {
+    None =>
+      Err (errorAt st "unterminated string");
+
+    Some c =>
+      if c == "\"" then
+        Ok { value = acc, state = advance st 1 }
+      else if c == "\n" || c == "\r" then
+        Err (errorAt st "unescaped line break in string")
+      else if c == "\\" then
+        match peekChar (advance st 1) {
+          None =>
+            Err (errorAt st "unterminated string");
+
+          Some e =>
+            match escapeValue e {
+              None => Err (errorAt st (str_concat "unknown escape \\" e));
+              Some decoded => stringBody (advance st 2) (str_concat acc decoded);
+            };
+        }
+      else
+        stringBody (advance st 1) (str_concat acc c);
+  };
+
+let stringLiteral =
+  lexeme
+    (andThen (charP "\"") (fn ignored =>
+      fn st => stringBody st ""));
+
+#skip spaces, tabs, line breaks, and // comments between tokens
+
+#p1 = first parser, p2 = second parser
+let keepLeft p1 p2 =
+  andThen p1 (fn x =>
+    andThen p2 (fn ignored =>
+      pureP x));
+
+let isSpaceChar c =
+  c == " " || c == "\t" || c == "\n" || c == "\r";
+
+# lit as in literal/literally lol
+let text lit =
+  fn st =>
+    let n = str_len lit in
+    let err = Err (errorAt st (str_concat "expected \"" (str_concat lit "\""))) in
+    if st.index + n > str_len st.src then
+      err
+    else if str_slice st.src st.index (st.index + n) == lit then
+      Ok { value = lit, state = advance st n }
+    else
+      err;
+
+let lineComment =
+  andThen (text "//") (fn ignored =>
+    andThen (many (satisfy (fn c => c != "\n") "comment text")) (fn ignored2 =>
+      pureP unit));
+
+let whitespaceChar =
+  mapP (fn ignored => unit) (satisfy isSpaceChar "whitespace");
+
+let skipSpace =
+  mapP (fn ignored => unit) (many (orElse whitespaceChar lineComment));
+
+let lexeme p =
+  keepLeft p skipSpace;
+
+#boundaries for keywords and for operators to match their longest spelling
+
+let notFollowedBy p label =
+  fn st =>
+    match p st {
+      Ok ignored => Err (errorAt st (str_concat "unexpected " label));
+      Err ignored => Ok { value = unit, state = st };
+    };
+
+let keyword word =
+  lexeme
+    (keepLeft
+      (text word)
+      (notFollowedBy (satisfy isIdentChar "identifier character")
+        (str_concat "identifier character after keyword " word)));
+
+let symbol s =
+  lexeme (text s);
+
+let symbolExcept s nextChars =
+  lexeme
+    (keepLeft
+      (text s)
+      (notFollowedBy (satisfy (fn c => containsString nextChars c) "longer operator")
+        (str_concat "longer operator starting with " s)));
+
+#check if a list of names has any duplicates (can be used in 2b & for checking duplicate var names in func)
+letrec hasDuplicate names =
+  match names {
+    [] => false;
+    first :: rest =>
+      if containsString rest first then
+        true
+      else
+        hasDuplicate rest;
+  };
