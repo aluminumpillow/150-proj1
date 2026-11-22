@@ -1,7 +1,7 @@
 include "common.kl";
 include "syntax.kl";
 
-
+# inArr :: a -> [a] -> Bool
 letrec inArr elem arr =
   match arr {
   
@@ -13,6 +13,7 @@ letrec inArr elem arr =
     
   };
 
+# allUnique :: [{name: String, typ: Type}] -> [String] -> Bool
 letrec allUnique records curr =
   match records {
     [] => 
@@ -42,6 +43,8 @@ let extendScope scope name typ =
     else
      scope query;
 
+// helper to add {name: string, typ: Type} bindings into a scope using extendScope
+# addBindings :: (String -> Option Type) -> [{name: string, typ: Type}] -> (String -> Option Type)
 letrec addBindings scope bindings =
   match bindings {
     [] => scope;
@@ -67,6 +70,8 @@ letrec typeEquals left right =
       true;
 
     FunctionType lParams lRet, FunctionType rParams rRet =>
+      // helper to recursively match left and right types in order
+      # paramsMatch :: [Type] -> [Type] -> Bool
       letrec paramsMatch left right =
         match left, right {
           [], [] => true;
@@ -84,6 +89,11 @@ letrec typeEquals left right =
         false
       else
         let rightScope = addBindings emptyScope rRecord in
+        // Unlike paramsMatch helper in FunctionType, since fields can be in any order
+        // each type in left must be checked against every type in right.
+        // Do this by adding all bindings into an emptyScope, then for each name
+        // in left, check if it exists in the new scope (and then check if equal). 
+        # fieldsMatch :: [{name: String, typ: Type}] -> Bool
         letrec fieldsMatch fields =
           match fields {
             [] => true;
@@ -102,19 +112,23 @@ letrec typeEquals left right =
       false;
   };
 
-
+# pushScope :: [(String -> Option Type)] -> [(String -> Option Type)]
 let pushScope typeEnv =
   emptyScope :: typeEnv;
 
-# localScope ::= List (String -> Option Type) -> (String -> Option Type)
+# localScope ::  [(String -> Option Type)] -> (String -> Option Type)
 let localScope typeEnv =
   match typeEnv {
     scope :: rest => scope;
     [] => emptyScope;
   };
 
+# [(String -> Option Type)]
 let initialTypeEnv = [emptyScope];
 
+// helper that goes through the whole typeEnv (i.e. stack of scopes)
+// and check if name is bound
+# lookup :: String -> [(String -> Option Type)] -> Result Type TypeError
 letrec lookup name typeEnv =
   match typeEnv {
     [] =>
@@ -127,9 +141,11 @@ letrec lookup name typeEnv =
       };
   };
 
-// i.e. recursive check on types
+// recursively validates function parameter/return types and record field types
 # validateType : Type -> Result Unit TypeError
 letrec validateType typ =
+  // helper to go through list of Types
+  # validateTypes :: [Types] -> Result Unit TypeError
   letrec validateTypes types =
     match types {
       [] => Ok unit;
@@ -159,9 +175,8 @@ letrec validateType typ =
   };
 
 
-# checkExpr    : Expr -> TypeEnv -> Result Type TypeError
+# checkExpr :: Expr -> TypeEnv -> Result Type TypeError
 letrec checkExpr expr typeEnv =
-  // check for uniquness aswell of field names and paramters here before continuing. 
 
   match expr {
 
@@ -278,7 +293,7 @@ letrec checkExpr expr typeEnv =
       };
 
     FnExpr params returnType body =>
-      // uniqueness check on params not enough
+      // uniqueness check on params
       if not (allUnique params []) then
         Err "duplicate parameter names"
       else
@@ -305,7 +320,9 @@ letrec checkExpr expr typeEnv =
         Err err => Err err;
     
         Ok (FunctionType paramTypes returnType) =>
-          let arityError = "number of arguments does not match number of parameters" in
+          let arityError = "number of arguments do not match number of parameters" in
+          // checks all expressions in arguments if their resulting type matches expected types
+          # checkArgs :: [Expr] -> [{name: String, typ: Type}] -> Result Type TypeError
           letrec checkArgs args params =
             match args, params {
               [], [] =>
@@ -337,6 +354,8 @@ letrec checkExpr expr typeEnv =
       if not (allUnique fields []) then
         Err "duplicate record field names"
       else
+        // getting the type of each expr in fields while reconstructing the list in that order
+        # getTypedFields :: [{name: String, expr: Expr}] -> Result ([{name: String, type: Type}]) TypeError
         letrec getTypedFields fields =
           match fields {
             [] => Ok [];
@@ -362,6 +381,8 @@ letrec checkExpr expr typeEnv =
     FieldExpr expr targetFieldName =>
       match checkExpr expr typeEnv {
         Ok (RecordType typedFields) =>
+          // checks if record has name targetFieldName in typedFields
+          # findField :: [{name: String, expr: Expr}] -> Result Type TypeError
           letrec findField fields =
             match fields {
               [] =>
@@ -385,10 +406,13 @@ letrec checkExpr expr typeEnv =
     _ => Err "invalid constructor type"; 
   };
 
-# checkStmt    : Stmt -> TypeEnv -> Result TypeEnv TypeError
+# checkStmt :: Stmt -> TypeEnv -> Result TypeEnv TypeError
 letrec checkStmt stmt typeEnv =
   
-  // T-SeqEmpty and T-SeqCons helper/checker
+  // for T-SeqEmpty and T-SeqCons
+  // also a helper function that checks if each stmt in the list 
+  // is valid and passes the typEnv on the next stmt
+  # checkSeq [Stmt] -> [(String -> Option Type)] -> Result TypeEnv TypeError
   letrec checkSeq stmts typeEnv =
     match stmts {
       [] => Ok typeEnv;
@@ -484,8 +508,9 @@ letrec checkStmt stmt typeEnv =
     _ => Err "invalid statement type";
   };
 
-// checkProgram : Program -> Result Unit TypeError
+# checkProgram :: Program -> Result Unit TypeError
 let checkProgram program =
+  # checkSeq [Stmt] -> [(String -> Option Type)] -> Result TypeEnv TypeError
   letrec checkSeq stmts typeEnv =
     match stmts {
       [] => Ok typeEnv;
