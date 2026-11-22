@@ -70,14 +70,14 @@ letrec typeEquals left right =
       true;
 
     FunctionType lParams lRet, FunctionType rParams rRet =>
-      // helper to recursively match left and right types in order
-      # paramsMatch :: [Type] -> [Type] -> Bool
+      // helper that compare parameter types in order, ignoring their names
+      # paramsMatch :: [{name: String, typ: Type}] -> [{name: String, typ: Type}] -> Bool
       letrec paramsMatch left right =
         match left, right {
           [], [] => true;
     
           lParam :: lRest, rParam :: rRest =>
-            (typeEquals lParam rParam) && (paramsMatch lRest rRest);
+            (typeEquals lParam.typ rParam.typ) && (paramsMatch lRest rRest);
     
           _, _ => false;
         }
@@ -162,11 +162,14 @@ letrec validateType typ =
     BoolType => Ok unit;
     StringType => Ok unit;
     NullType => Ok unit;
-    FunctionType paramTypes retType =>
-      match validateTypes paramTypes {
-        Ok _ => validateType retType;
-        Err err => Err err;
-      };
+    FunctionType params retType =>
+      if not (allUnique params []) then
+        Err "duplicate function type parameter name"
+      else
+        match validateTypes (map (fn param => param.typ) params) {
+          Ok _ => validateType retType;
+          Err err => Err err;
+        };
     RecordType fieldTypes =>
       if not (allUnique fieldTypes []) then
         Err "duplicate record field names"
@@ -297,7 +300,7 @@ letrec checkExpr expr typeEnv =
       if not (allUnique params []) then
         Err "duplicate parameter names"
       else
-        let fnType = FunctionType (map (fn p => p.typ) params) returnType in
+        let fnType = FunctionType params returnType in
         // recursively check params using validateType
         match validateType fnType {
           Err err => Err err;
@@ -319,7 +322,7 @@ letrec checkExpr expr typeEnv =
       match checkExpr function typeEnv {
         Err err => Err err;
     
-        Ok (FunctionType paramTypes returnType) =>
+        Ok (FunctionType params returnType) =>
           let arityError = "number of arguments do not match number of parameters" in
           // checks all expressions in arguments if their resulting type matches expected types
           # checkArgs :: [Expr] -> [{name: String, typ: Type}] -> Result Type TypeError
@@ -333,19 +336,19 @@ letrec checkExpr expr typeEnv =
                   Err err => Err err;
     
                   Ok actual =>
-                    if typeEquals actual expected then
+                    if typeEquals actual expected.typ then
                       checkArgs restArgs restParams
                     else
-                      Err (typeMismatch expected actual); 
+                      Err (typeMismatch expected.typ actual);
                 };
     
               _, _ => Err arityError;
             }
           in
-            if length arguments != length paramTypes then
+            if length arguments != length params then
               Err arityError
             else
-              checkArgs arguments paramTypes;
+              checkArgs arguments params;
       
         Ok _ => Err "application requires a function";
       };

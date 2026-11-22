@@ -40,6 +40,12 @@ let testProgramGrammar: IO Unit =
     assert "let with annotation"
       (parsesAs "let x: number = 10;"
         [LetStmt "x" (Some NumberType) (NumberExpr 10.0)]);
+    assert "duplicate function type parameter names are preserved for type checking"
+      (parsesAs "let f: (x: number, x: string) => number = null;"
+        [LetStmt "f" (Some (FunctionType [
+          {name = "x", typ = NumberType},
+          {name = "x", typ = StringType}
+        ] NumberType)) NullExpr]);
     assert "unary minus is separate from number literal"
       (parsesAs "let x = -5;"
         [LetStmt "x" None (UnaryOpExpr NegOp (NumberExpr 5.0))]);
@@ -79,7 +85,10 @@ let testTypes: IO Unit =
       (typeParsesAs "() => string" (FunctionType [] StringType));
     assert "two-argument function type"
       (typeParsesAs "(x: number, y: boolean) => null"
-        (FunctionType [NumberType, BoolType] NullType));
+        (FunctionType [
+          {name = "x", typ = NumberType},
+          {name = "y", typ = BoolType}
+        ] NullType));
     assert "record type with trailing semicolon"
       (typeParsesAs "{ name: string; year: number; }"
         (RecordType [
@@ -93,7 +102,9 @@ let testTypes: IO Unit =
       (typeParsesAs "{}" (RecordType []));
     assert "nested higher-order function type"
       (typeParsesAs "(f: (x: number) => number) => number"
-        (FunctionType [FunctionType [NumberType] NumberType] NumberType));
+        (FunctionType [
+          {name = "f", typ = FunctionType [{name = "x", typ = NumberType}] NumberType}
+        ] NumberType));
     outputLnIO "PASS: 2b type grammar"
   };
 
@@ -172,8 +183,6 @@ let testRejectedSyntax: IO Unit =
       (failsParse "{ x: 1 };");
     assert "trailing comma in parameter list" (failsParse "let f = (x: number,): number => x;");
     assert "stray unmatched close brace" (failsParse "}");
-    assert "duplicate function type parameter names"
-      (failsParse "let f: (x: number, x: string) => number = null;");
     outputLnIO "PASS: 2b/2c malformed syntax"
   };
 

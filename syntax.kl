@@ -7,7 +7,7 @@ type Type
   | BoolType
   | StringType
   | NullType
-  | FunctionType [Type] Type
+  | FunctionType [{name: String, typ: Type}] Type
   | RecordType [{name: String, typ: Type}];
 
 type alias Scope = String -> (Option Type);

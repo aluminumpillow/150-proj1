@@ -55,7 +55,7 @@ letrec showType typ =
     NullType => "null";
 
     FunctionType params ret =>
-      let paramText = joinComma (map showType params) in
+      let paramText = joinComma (map (fn param => showType param.typ) params) in
       str_concat "(" (str_concat paramText (str_concat ") -> " (showType ret)));
 
     RecordType fields =>

@@ -336,18 +336,6 @@ let symbolExcept s nextChars =
       (notFollowedBy (satisfy (fn c => containsString nextChars c) "longer operator")
         (str_concat "longer operator starting with " s)));
 
-#[helper] true if a list of names has a duplicate
-#check if a list of names has any duplicates (can be used in 2b & for checking duplicate var names in func)
-letrec hasDuplicate names =
-  match names {
-    [] => false;
-    first :: rest =>
-      if containsString rest first then
-        true
-      else
-        hasDuplicate rest;
-  };
-
 #item 2c: parser combinators for putting smaller parsers together
 
 #[helper] parses one or more values with a separator in between
@@ -409,17 +397,12 @@ let typeField parseType =
       (mapP (fn typ => {name = name, typ = typ}) parseType));
 
 #[helper] parses (x: number) => number as a function type
-#checks for repeated parameter names before keeping just their types
+#preserves parameter names for validation by the type checker
 let functionTypeParser parseType =
   andThen (parenthesized (sepBy (typeParameter parseType) (symbol ",")))
     (fn params =>
-      if hasDuplicate (map (fn param => param.name) params) then
-        failP "duplicate function type parameter name"
-      else
-        keepRight (symbol "=>")
-          (mapP (fn ret =>
-            FunctionType (map (fn param => param.typ) params) ret)
-            parseType));
+      keepRight (symbol "=>")
+        (mapP (fn ret => FunctionType params ret) parseType));
 
 #[helper] parses record types; the last semicolon is optional
 let recordTypeParser parseType =

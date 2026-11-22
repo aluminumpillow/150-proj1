@@ -149,14 +149,6 @@ let testKeywordsAndOperators: IO Unit =
     outputLnIO "✅ keywords and operators"
   };
 
-let testHasDuplicate: IO Unit =
-  do (bindIO) {
-    assert "hasDuplicate: none" (not (hasDuplicate ["x", "y", "z"]));
-    assert "hasDuplicate: found" (hasDuplicate ["x", "y", "x"]);
-    assert "hasDuplicate: empty" (not (hasDuplicate []));
-    outputLnIO "✅ hasDuplicate"
-  };
-
 let main: IO Unit =
   do (bindIO) {
     testReserved;
@@ -165,6 +157,5 @@ let main: IO Unit =
     testString;
     testSkipSpace;
     testKeywordsAndOperators;
-    testHasDuplicate;
     outputLnIO "✅ All 2a tests passing"
   };
