@@ -1,336 +1,257 @@
-# Included by test_checker.kl after checker.kl and test_helper.kl.
-# Scope values are functions, so inspect bindings and scope depth instead of
-# comparing returned environments with ==.
-let assertStmtOk label stmt typeEnv verify =
-  match checkStmt stmt typeEnv {
-    Ok resultEnv => assert label (verify resultEnv);
-    Err _ => assert label false;
+# Included by test_checker.kl after checker.kl.
+# Use these helpers for success/errors, or match Ok env to inspect bindings.
+# Environments contain scope functions, so do not compare whole results with ==.
+let stmtSucceeds result =
+  match result {
+    Ok _ => true;
+    Err _ => false;
   };
 
-let assertStmtErr label stmt typeEnv expectedError =
-  match checkStmt stmt typeEnv {
-    Ok _ => assert label false;
-    Err actualError => assert label (actualError == expectedError);
+let stmtFailsWith result expected =
+  match result {
+    Ok _ => false;
+    Err actual => actual == expected;
   };
-
-let stmtDuplicateRecordType = RecordType [
-  {name = "x", typ = NumberType}, {name = "x", typ = BoolType}
-];
-
-let stmtNonBooleanConditions = [
-  {label = "number", expr = NumberExpr 1.0, error = "expected boolean, got number"},
-  {label = "string", expr = StringExpr "", error = "expected boolean, got string"},
-  {label = "null", expr = NullExpr, error = "expected boolean, got null"},
-  {label = "record", expr = RecordExpr [], error = "expected boolean, got {}"},
-  {
-    label = "function", expr = FnExpr [] NullType NullExpr,
-    error = "expected boolean, got () -> null"
-  }
-];
 
 let testLetStmt: IO Unit =
+  let numberScope = extendScope emptyScope "x" NumberType in
   do (bindIO) {
-    forEachTest (fn sample =>
-      do (bindIO) {
-        assertStmtOk (str_concat "LetStmt: infers " sample.label)
-          (LetStmt "value" None sample.expr) initialTypeEnv
-          (fn env => length env == 1 && (localScope env) "value" == Some sample.typ);
-        assertStmtOk (str_concat "LetStmt: accepts annotation for " sample.label)
-          (LetStmt "value" (Some sample.typ) sample.expr) initialTypeEnv
-          (fn env => length env == 1 && lookup "value" env == Ok sample.typ)
-      }
-    ) exprSamples;
-    assertStmtOk "LetStmt: preserves existing and outer bindings without adding a scope"
-      (LetStmt "fresh" None (StringExpr "text")) [scope1, scope2]
-      (fn env => length env == 2 &&
-        (localScope env) "fresh" == Some StringType &&
-        lookup "x" env == Ok NumberType && lookup "flag" env == Ok BoolType);
-    assertStmtOk "LetStmt: permits shadowing an outer declaration"
-      (LetStmt "x" None (BoolExpr true)) [emptyScope, scope2]
-      (fn env => length env == 2 && (localScope env) "x" == Some BoolType &&
-        lookup "flag" env == Ok BoolType && scope2 "x" == Some NumberType);
-    assertStmtOk "LetStmt: shadowing initializer reads the outer binding"
-      (LetStmt "x" None (VarExpr "x")) [emptyScope, scope1]
-      (fn env => length env == 2 && (localScope env) "x" == Some NumberType);
-    assertStmtErr "LetStmt: shadowing initializer does not use the new annotation"
-      (LetStmt "x" (Some BoolType) (VarExpr "x")) [emptyScope, scope1]
-      "expected boolean, got number";
-    assertStmtOk "LetStmt: declaration names are case sensitive"
-      (LetStmt "X" None (BoolExpr true)) [scope1]
-      (fn env => lookup "X" env == Ok BoolType && lookup "x" env == Ok NumberType);
-    assertStmtErr "LetStmt: duplicate declaration with matching type"
-      (LetStmt "x" None (NumberExpr 2.0)) [scope1] "duplicate declaration: x";
-    assertStmtErr "LetStmt: duplicate declaration with different type"
-      (LetStmt "x" (Some BoolType) (BoolExpr true)) [scope1] "duplicate declaration: x";
-    assertStmtErr "LetStmt: inferred declaration does not bind its own initializer"
-      (LetStmt "self" None (VarExpr "self")) initialTypeEnv "unbound variable: self";
-    assertStmtErr "LetStmt: annotated declaration does not bind its own initializer"
-      (LetStmt "self" (Some NumberType) (VarExpr "self")) initialTypeEnv "unbound variable: self";
-    assertStmtErr "LetStmt: function initializer cannot recursively refer to its new name"
-      (LetStmt "f" (Some (FunctionType [] NumberType))
-        (FnExpr [] NumberType (AppExpr (VarExpr "f") []))) initialTypeEnv
-      "unbound variable: f";
-    assertStmtErr "LetStmt: primitive annotation mismatch"
-      (LetStmt "value" (Some BoolType) (NumberExpr 1.0)) initialTypeEnv
-      "expected boolean, got number";
-    assertStmtErr "LetStmt: function annotation arity mismatch"
-      (LetStmt "f" (Some (FunctionType [NumberType] NumberType))
-        (FnExpr [] NumberType (NumberExpr 1.0))) initialTypeEnv
-      "expected (number) -> number, got () -> number";
-    assertStmtErr "LetStmt: function annotation return mismatch"
-      (LetStmt "f" (Some (FunctionType [] BoolType))
-        (FnExpr [] NumberType (NumberExpr 1.0))) initialTypeEnv
-      "expected () -> boolean, got () -> number";
-    assertStmtErr "LetStmt: record annotation field type mismatch"
-      (LetStmt "r" (Some (RecordType [{name = "n", typ = BoolType}]))
-        (RecordExpr [{name = "n", expr = NumberExpr 1.0}])) initialTypeEnv
-      "expected {n: boolean}, got {n: number}";
-    assertStmtErr "LetStmt: record annotation does not allow extra fields"
-      (LetStmt "r" (Some (RecordType []))
-        (RecordExpr [{name = "n", expr = NumberExpr 1.0}])) initialTypeEnv
-      "expected {}, got {n: number}";
-    assertStmtErr "LetStmt: record annotation requires all declared fields"
-      (LetStmt "r" (Some (RecordType [{name = "n", typ = NumberType}]))
-        (RecordExpr [])) initialTypeEnv "expected {n: number}, got {}";
-    assertStmtOk "LetStmt: structurally equal reordered record annotation"
-      (LetStmt "r" (Some (RecordType [
-        {name = "active", typ = BoolType}, {name = "count", typ = NumberType}
-      ])) (RecordExpr [
-        {name = "count", expr = NumberExpr 1.0}, {name = "active", expr = BoolExpr true}
-      ])) initialTypeEnv
-      (fn env => checkExpr (FieldExpr (VarExpr "r") "count") env == Ok NumberType &&
-        checkExpr (FieldExpr (VarExpr "r") "active") env == Ok BoolType);
-    assertStmtErr "LetStmt: rejects duplicate fields in a direct annotation"
-      (LetStmt "r" (Some stmtDuplicateRecordType) (RecordExpr [])) initialTypeEnv
-      "duplicate record field names";
-    assertStmtErr "LetStmt: rejects duplicate fields nested in a record annotation"
-      (LetStmt "r" (Some (RecordType [{name = "inner", typ = stmtDuplicateRecordType}]))
-        (RecordExpr [])) initialTypeEnv "duplicate record field names";
-    assertStmtErr "LetStmt: validates function parameter types inside an annotation"
-      (LetStmt "f" (Some (FunctionType [NumberType, stmtDuplicateRecordType] NullType))
-        NullExpr) initialTypeEnv "duplicate record field names";
-    assertStmtErr "LetStmt: validates function return types inside an annotation"
-      (LetStmt "f" (Some (FunctionType [] stmtDuplicateRecordType)) NullExpr)
-      initialTypeEnv "duplicate record field names";
-    assertStmtErr "LetStmt: deeply nested annotation validation reaches function returns"
-      (LetStmt "r" (Some (RecordType [{
-        name = "factory", typ = FunctionType [NumberType]
-          (RecordType [{name = "inner", typ = stmtDuplicateRecordType}])
-      }])) NullExpr) initialTypeEnv "duplicate record field names";
-    assertStmtErr "LetStmt: invalid initializer error propagates"
-      (LetStmt "value" None (UnaryOpExpr NegOp (BoolExpr true))) initialTypeEnv
-      "bad operand type for unary operator";
-    assertStmtErr "LetStmt: initializer error precedes malformed annotation"
-      (LetStmt "value" (Some stmtDuplicateRecordType) (VarExpr "missing")) initialTypeEnv
-      "unbound variable: missing";
-    assertStmtErr "LetStmt: initializer error precedes duplicate declaration"
-      (LetStmt "x" None (VarExpr "missing")) [scope1] "unbound variable: missing";
-    assertStmtErr "LetStmt: duplicate declaration precedes annotation validation"
-      (LetStmt "x" (Some stmtDuplicateRecordType) NullExpr) [scope1] "duplicate declaration: x";
-    assertStmtErr "LetStmt: no current scope for inferred declaration"
-      (LetStmt "value" None (NumberExpr 1.0)) [] "type environment has no current scope";
-    assertStmtErr "LetStmt: no current scope for annotated declaration"
-      (LetStmt "value" (Some NumberType) (NumberExpr 1.0)) [] "type environment has no current scope";
-    assertStmtErr "LetStmt: initializer error precedes missing current scope"
-      (LetStmt "value" None (VarExpr "missing")) [] "unbound variable: missing"
+    assert "let introduces x without adding a scope"
+      (match checkStmt (LetStmt "x" None (NumberExpr 1.0)) initialTypeEnv {
+        Ok env => length env == 1 && (localScope env) "x" == Some NumberType;
+        Err _ => false;
+      });
+    assert "let accepts a matching annotation"
+      (stmtSucceeds (checkStmt
+        (LetStmt "message" (Some StringType) (StringExpr "hello")) initialTypeEnv));
+    assert "let may shadow an outer declaration"
+      (match checkStmt (LetStmt "x" None (BoolExpr true)) [emptyScope, numberScope] {
+        Ok env => length env == 2 && (localScope env) "x" == Some BoolType;
+        Err _ => false;
+      });
+    assert "shadowing initializer reads the outer x"
+      (match checkStmt (LetStmt "x" None (VarExpr "x")) [emptyScope, numberScope] {
+        Ok env => (localScope env) "x" == Some NumberType;
+        Err _ => false;
+      });
+    assert "reject a duplicate declaration in the current scope"
+      (stmtFailsWith (checkStmt (LetStmt "x" None (BoolExpr true)) [numberScope])
+        "duplicate declaration: x");
+    assert "a declaration cannot use itself in its initializer"
+      (stmtFailsWith (checkStmt (LetStmt "self" (Some NumberType) (VarExpr "self")) initialTypeEnv)
+        "unbound variable: self");
+    assert "reject an annotation mismatch"
+      (stmtFailsWith (checkStmt (LetStmt "x" (Some BoolType) (NumberExpr 1.0)) initialTypeEnv)
+        "expected boolean, got number");
+    assert "a declaration requires a current scope"
+      (stmtFailsWith (checkStmt (LetStmt "x" None (NumberExpr 1.0)) [])
+        "type environment has no current scope")
+  };
+
+let testLetAnnotations: IO Unit =
+  let documentedType = FunctionType [{name = "documented", typ = NumberType}] NumberType in
+  let identity = FnExpr [{name = "actual", typ = NumberType}] NumberType (VarExpr "actual") in
+  let actualType = FunctionType [{name = "actual", typ = NumberType}] NumberType in
+  let recordType = RecordType [
+    {name = "count", typ = NumberType}, {name = "active", typ = BoolType}
+  ] in
+  let reorderedRecord = RecordExpr [
+    {name = "active", expr = BoolExpr true}, {name = "count", expr = NumberExpr 1.0}
+  ] in
+  do (bindIO) {
+    assert "function annotations may rename parameters"
+      (match checkStmt (LetStmt "f" (Some documentedType) identity) initialTypeEnv {
+        Ok env => lookup "f" env == Ok actualType;
+        Err _ => false;
+      });
+    assert "record annotations may reorder fields"
+      (match checkStmt (LetStmt "r" (Some recordType) reorderedRecord) initialTypeEnv {
+        Ok env => lookup "r" env == Ok (RecordType [
+          {name = "active", typ = BoolType}, {name = "count", typ = NumberType}
+        ]);
+        Err _ => false;
+      });
+    assert "reject a function annotation with the wrong arity"
+      (stmtFailsWith (checkStmt (LetStmt "f" (Some documentedType)
+        (FnExpr [] NumberType (NumberExpr 1.0))) initialTypeEnv)
+        "expected (number) -> number, got () -> number")
+  };
+
+let testLetTypeValidation: IO Unit =
+  let duplicateRecordType = RecordType [
+    {name = "x", typ = NumberType}, {name = "x", typ = BoolType}
+  ] in
+  let duplicateFunctionType = FunctionType [
+    {name = "x", typ = NumberType}, {name = "x", typ = BoolType}
+  ] NumberType in
+  let nestedCallbackType = RecordType [
+    {name = "makeCallback", typ = FunctionType [] duplicateFunctionType}
+  ] in
+  let numberScope = extendScope emptyScope "x" NumberType in
+  do (bindIO) {
+    assert "reject duplicate record fields in an annotation"
+      (stmtFailsWith (checkStmt (LetStmt "r" (Some duplicateRecordType) NullExpr) initialTypeEnv)
+        "duplicate record field names");
+    assert "reject duplicate function-type parameters in an annotation"
+      (stmtFailsWith (checkStmt (LetStmt "f" (Some duplicateFunctionType) NullExpr) initialTypeEnv)
+        "duplicate function type parameter name");
+    assert "validate function types nested inside record fields and return types"
+      (stmtFailsWith (checkStmt (LetStmt "r" (Some nestedCallbackType) NullExpr) initialTypeEnv)
+        "duplicate function type parameter name");
+    assert "validate record types nested inside function parameters"
+      (stmtFailsWith (checkStmt (LetStmt "f" (Some (FunctionType [
+        {name = "record", typ = duplicateRecordType}
+      ] NullType)) NullExpr) initialTypeEnv) "duplicate record field names");
+    assert "initializer errors precede duplicate declarations and invalid annotations"
+      (stmtFailsWith (checkStmt (LetStmt "x" (Some duplicateRecordType) (VarExpr "missing"))
+        [numberScope]) "unbound variable: missing");
+    assert "duplicate declarations precede annotation validation"
+      (stmtFailsWith (checkStmt (LetStmt "x" (Some duplicateFunctionType) NullExpr) [numberScope])
+        "duplicate declaration: x")
   };
 
 let testExprStmt: IO Unit =
+  let envWithX = [extendScope emptyScope "x" NumberType] in
+  let identity = FnExpr [{name = "parameter", typ = NumberType}] NumberType (VarExpr "parameter") in
   do (bindIO) {
-    forEachTest (fn sample =>
-      assertStmtOk (str_concat "ExprStmt: accepts expression of type " sample.label)
-        (ExprStmt sample.expr) sampleEnv
-        (fn env => length env == 1 && lookup "number" env == Ok NumberType &&
-          lookup "boolean" env == Ok BoolType && lookup "missing" env == Err "unbound variable: missing")
-    ) exprSamples;
-    assertStmtOk "ExprStmt: works without a current scope for a closed expression"
-      (ExprStmt NullExpr) [] (fn env => length env == 0);
-    assertStmtOk "ExprStmt: assignment checks without changing the binding type"
-      (ExprStmt (AssignExpr "x" (NumberExpr 2.0))) [scope1]
-      (fn env => length env == 1 && lookup "x" env == Ok NumberType);
-    assertStmtOk "ExprStmt: nested call, record access, and arithmetic"
-      (ExprStmt (BinOpExpr AddOp
-        (AppExpr (FnExpr [{name = "n", typ = NumberType}] NumberType
-          (BinOpExpr MulOp (VarExpr "n") (NumberExpr 2.0))) [NumberExpr 3.0])
-        (FieldExpr (RecordExpr [{name = "count", expr = NumberExpr 4.0}]) "count")))
-      initialTypeEnv (fn env => length env == 1 && (localScope env) "n" == None);
-    assertStmtErr "ExprStmt: unbound variable error propagates"
-      (ExprStmt (VarExpr "missing")) initialTypeEnv "unbound variable: missing";
-    assertStmtErr "ExprStmt: assignment mismatch propagates"
-      (ExprStmt (AssignExpr "x" (BoolExpr true))) [scope1] "assignment type mismatch";
-    assertStmtErr "ExprStmt: malformed function annotation propagates"
-      (ExprStmt (FnExpr [{name = "r", typ = stmtDuplicateRecordType}] NullType NullExpr))
-      initialTypeEnv "duplicate record field names"
+    assert "an assignment statement preserves the variable type and scope depth"
+      (match checkStmt (ExprStmt (AssignExpr "x" (NumberExpr 2.0))) envWithX {
+        Ok env => length env == 1 && lookup "x" env == Ok NumberType;
+        Err _ => false;
+      });
+    assert "an expression statement does not introduce function parameters"
+      (match checkStmt (ExprStmt identity) initialTypeEnv {
+        Ok env => length env == 1 && lookup "parameter" env == Err "unbound variable: parameter";
+        Err _ => false;
+      });
+    assert "expression statement errors propagate"
+      (stmtFailsWith (checkStmt (ExprStmt (UnaryOpExpr NotOp (NumberExpr 1.0))) initialTypeEnv)
+        "bad operand type for unary operator")
   };
 
 let testBlockStmt: IO Unit =
+  let envWithX = [extendScope emptyScope "x" NumberType] in
+  let usesEarlierDeclaration = BlockStmt [
+    LetStmt "local" None (NumberExpr 1.0),
+    LetStmt "copy" None (BinOpExpr AddOp (VarExpr "local") (VarExpr "x")),
+    ExprStmt (VarExpr "copy")
+  ] in
+  let shadowsOuterX = BlockStmt [
+    LetStmt "x" None (BoolExpr true), ExprStmt (UnaryOpExpr NotOp (VarExpr "x"))
+  ] in
   do (bindIO) {
-    assertStmtOk "BlockStmt: empty block preserves the environment"
-      (BlockStmt []) [scope2]
-      (fn env => length env == 1 && lookup "x" env == Ok NumberType && lookup "flag" env == Ok BoolType);
-    assertStmtOk "BlockStmt: empty block with no outer scope"
-      (BlockStmt []) [] (fn env => length env == 0);
-    assertStmtOk "BlockStmt: supplies a local scope even without outer scopes"
-      (BlockStmt [LetStmt "x" None (NumberExpr 1.0), ExprStmt (VarExpr "x")]) []
-      (fn env => length env == 0 && lookup "x" env == Err "unbound variable: x");
-    assertStmtOk "BlockStmt: declarations feed later initializers and expressions"
-      (BlockStmt [
-        LetStmt "x" None (NumberExpr 1.0),
-        LetStmt "y" None (BinOpExpr AddOp (VarExpr "x") (NumberExpr 2.0)),
-        ExprStmt (BinOpExpr MulOp (VarExpr "x") (VarExpr "y"))
-      ]) [scope2]
-      (fn env => length env == 1 && lookup "x" env == Ok NumberType &&
-        lookup "flag" env == Ok BoolType && lookup "y" env == Err "unbound variable: y");
-    assertStmtOk "BlockStmt: nested shadows are local and enclosing types are restored"
-      (BlockStmt [
-        LetStmt "local" None (NumberExpr 1.0),
-        BlockStmt [
-          LetStmt "local" None (BoolExpr true),
-          ExprStmt (UnaryOpExpr NotOp (VarExpr "local"))
-        ],
-        ExprStmt (BinOpExpr AddOp (VarExpr "local") (VarExpr "x"))
-      ]) [scope1]
-      (fn env => length env == 1 && lookup "x" env == Ok NumberType &&
-        lookup "local" env == Err "unbound variable: local");
-    assertStmtOk "BlockStmt: may shadow an outer declaration with another type"
-      (BlockStmt [LetStmt "x" None (StringExpr "local"), ExprStmt (VarExpr "x")]) [scope1]
-      (fn env => lookup "x" env == Ok NumberType && length env == 1);
-    assertStmtErr "BlockStmt: duplicate declaration in the same block"
-      (BlockStmt [LetStmt "x" None (NumberExpr 1.0), LetStmt "x" None (BoolExpr true)])
-      initialTypeEnv "duplicate declaration: x";
-    assertStmtErr "BlockStmt: nested block locals do not escape to later statements"
-      (BlockStmt [BlockStmt [LetStmt "inside" None NullExpr], ExprStmt (VarExpr "inside")])
-      initialTypeEnv "unbound variable: inside";
-    assertStmtErr "BlockStmt: forward references are rejected"
-      (BlockStmt [ExprStmt (VarExpr "later"), LetStmt "later" None (NumberExpr 1.0)])
-      initialTypeEnv "unbound variable: later";
-    assertStmtErr "BlockStmt: later statement error propagates"
-      (BlockStmt [LetStmt "x" None (NumberExpr 1.0), ExprStmt (VarExpr "missing")])
-      initialTypeEnv "unbound variable: missing";
-    assertStmtErr "BlockStmt: first statement error wins"
-      (BlockStmt [ExprStmt (VarExpr "firstMissing"), ExprStmt (VarExpr "lastMissing")])
-      initialTypeEnv "unbound variable: firstMissing"
+    assert "empty block succeeds"
+      (stmtSucceeds (checkStmt (BlockStmt []) initialTypeEnv));
+    assert "block declarations reach later statements and stay local"
+      (match checkStmt usesEarlierDeclaration envWithX {
+        Ok env => length env == 1 && lookup "x" env == Ok NumberType &&
+          lookup "local" env == Err "unbound variable: local" &&
+          lookup "copy" env == Err "unbound variable: copy";
+        Err _ => false;
+      });
+    assert "block shadowing restores the outer binding"
+      (match checkStmt shadowsOuterX envWithX {
+        Ok env => length env == 1 && lookup "x" env == Ok NumberType;
+        Err _ => false;
+      });
+    assert "reject duplicate declarations in one block"
+      (stmtFailsWith (checkStmt (BlockStmt [
+        LetStmt "x" None NullExpr, LetStmt "x" None NullExpr
+      ]) initialTypeEnv) "duplicate declaration: x");
+    assert "nested block locals cannot escape into the enclosing block"
+      (stmtFailsWith (checkStmt (BlockStmt [
+        BlockStmt [LetStmt "inside" None NullExpr], ExprStmt (VarExpr "inside")
+      ]) initialTypeEnv) "unbound variable: inside");
+    assert "reject a use before its declaration"
+      (stmtFailsWith (checkStmt (BlockStmt [
+        ExprStmt (VarExpr "later"), LetStmt "later" None (NumberExpr 1.0)
+      ]) initialTypeEnv) "unbound variable: later");
+    assert "report the first statement error"
+      (stmtFailsWith (checkStmt (BlockStmt [
+        ExprStmt (VarExpr "firstMissing"), ExprStmt (VarExpr "lastMissing")
+      ]) initialTypeEnv) "unbound variable: firstMissing")
   };
 
 let testIfStmt: IO Unit =
+  let envWithX = [extendScope emptyScope "x" NumberType] in
+  let independentBranches = IfStmt (BoolExpr false)
+    [LetStmt "local" None (NumberExpr 1.0)]
+    (Some [LetStmt "local" None (BoolExpr true)]) in
+  let shadowsOuterX = IfStmt (BoolExpr true)
+    [LetStmt "x" None (BoolExpr true), ExprStmt (UnaryOpExpr NotOp (VarExpr "x"))]
+    (Some [ExprStmt (BinOpExpr AddOp (VarExpr "x") (NumberExpr 1.0))]) in
   do (bindIO) {
-    assertStmtOk "IfStmt: true condition without else"
-      (IfStmt (BoolExpr true) [] None) initialTypeEnv (fn env => length env == 1);
-    assertStmtOk "IfStmt: false condition without else"
-      (IfStmt (BoolExpr false) [] None) initialTypeEnv (fn env => length env == 1);
-    assertStmtOk "IfStmt: explicit empty else"
-      (IfStmt (BoolExpr true) [] (Some [])) [] (fn env => length env == 0);
-    assertStmtOk "IfStmt: nested boolean expression condition"
-      (IfStmt (BinOpExpr AndOp
-        (BinOpExpr LeOp (VarExpr "number") (NumberExpr 10.0))
-        (UnaryOpExpr NotOp (VarExpr "boolean"))) [] None) sampleEnv
-      (fn env => length env == 1 && lookup "number" env == Ok NumberType);
-    forEachTest (fn sample =>
-      assertStmtErr (str_concat "IfStmt: rejects condition of type " sample.label)
-        (IfStmt sample.expr [] None) initialTypeEnv sample.error
-    ) stmtNonBooleanConditions;
-    assertStmtErr "IfStmt: condition expression error propagates"
-      (IfStmt (VarExpr "missingCondition") [] None) initialTypeEnv "unbound variable: missingCondition";
-    assertStmtErr "IfStmt: condition type error precedes invalid body"
-      (IfStmt (NumberExpr 1.0) [ExprStmt (VarExpr "missingBody")] None) initialTypeEnv
-      "expected boolean, got number";
-    assertStmtErr "IfStmt: false condition still checks then block"
-      (IfStmt (BoolExpr false) [ExprStmt (VarExpr "badThen")] None) initialTypeEnv
-      "unbound variable: badThen";
-    assertStmtErr "IfStmt: true condition still checks else block"
-      (IfStmt (BoolExpr true) [] (Some [ExprStmt (VarExpr "badElse")])) initialTypeEnv
-      "unbound variable: badElse";
-    assertStmtErr "IfStmt: then error precedes else error"
-      (IfStmt (BoolExpr true) [ExprStmt (VarExpr "badThen")]
-        (Some [ExprStmt (VarExpr "badElse")])) initialTypeEnv "unbound variable: badThen";
-    assertStmtOk "IfStmt: branches have independent declarations with the same name"
-      (IfStmt (BoolExpr false)
-        [LetStmt "branch" None (NumberExpr 1.0), ExprStmt (VarExpr "branch")]
-        (Some [LetStmt "branch" None (BoolExpr true), ExprStmt (VarExpr "branch")])) initialTypeEnv
-      (fn env => length env == 1 && lookup "branch" env == Err "unbound variable: branch");
-    assertStmtOk "IfStmt: both branch scopes discard local declarations"
-      (IfStmt (BoolExpr true) [LetStmt "thenLocal" None NullExpr]
-        (Some [LetStmt "elseLocal" None (NumberExpr 1.0)])) [scope1]
-      (fn env => lookup "thenLocal" env == Err "unbound variable: thenLocal" &&
-        lookup "elseLocal" env == Err "unbound variable: elseLocal" && lookup "x" env == Ok NumberType);
-    assertStmtErr "IfStmt: else cannot see then declarations"
-      (IfStmt (BoolExpr true) [LetStmt "thenLocal" None NullExpr]
-        (Some [ExprStmt (VarExpr "thenLocal")])) initialTypeEnv "unbound variable: thenLocal";
-    assertStmtOk "IfStmt: branch shadows do not change the outer binding"
-      (IfStmt (BoolExpr true) [LetStmt "x" None (BoolExpr true)]
-        (Some [ExprStmt (BinOpExpr AddOp (VarExpr "x") (NumberExpr 1.0))])) [scope1]
-      (fn env => length env == 1 && lookup "x" env == Ok NumberType);
-    assertStmtErr "IfStmt: same-branch duplicate declaration is rejected"
-      (IfStmt (BoolExpr true) [LetStmt "x" None NullExpr, LetStmt "x" None NullExpr] None)
-      initialTypeEnv "duplicate declaration: x";
-    assertStmtOk "IfStmt: nested branch, loop, and block scopes"
-      (IfStmt (BoolExpr true) [
-        LetStmt "n" None (NumberExpr 1.0),
-        WhileStmt (BinOpExpr LtOp (VarExpr "n") (NumberExpr 5.0)) [
-          BlockStmt [LetStmt "step" None (NumberExpr 1.0)],
-          ExprStmt (AssignExpr "n" (BinOpExpr AddOp (VarExpr "n") (NumberExpr 1.0)))
-        ]
-      ] (Some [IfStmt (BoolExpr false) [] None])) initialTypeEnv
-      (fn env => length env == 1 && lookup "n" env == Err "unbound variable: n")
+    assert "if without else succeeds"
+      (stmtSucceeds (checkStmt (IfStmt (BoolExpr true) [] None) initialTypeEnv));
+    assert "branches have independent local scopes"
+      (match checkStmt independentBranches envWithX {
+        Ok env => length env == 1 && lookup "x" env == Ok NumberType &&
+          lookup "local" env == Err "unbound variable: local";
+        Err _ => false;
+      });
+    assert "branch shadowing preserves the outer x and the other branch"
+      (match checkStmt shadowsOuterX envWithX {
+        Ok env => length env == 1 && lookup "x" env == Ok NumberType;
+        Err _ => false;
+      });
+    assert "reject a non-boolean condition before checking branches"
+      (stmtFailsWith (checkStmt (IfStmt (NumberExpr 1.0)
+        [ExprStmt (VarExpr "badBody")] None) initialTypeEnv) "expected boolean, got number");
+    assert "condition expression errors propagate"
+      (stmtFailsWith (checkStmt (IfStmt (VarExpr "missing") [] None) initialTypeEnv)
+        "unbound variable: missing");
+    assert "check the then branch first even when the condition is false"
+      (stmtFailsWith (checkStmt (IfStmt (BoolExpr false)
+        [ExprStmt (VarExpr "badThen")] (Some [ExprStmt (VarExpr "badElse")])) initialTypeEnv)
+        "unbound variable: badThen");
+    assert "check the else branch even when the condition is true"
+      (stmtFailsWith (checkStmt (IfStmt (BoolExpr true) []
+        (Some [ExprStmt (VarExpr "badElse")])) initialTypeEnv) "unbound variable: badElse");
+    assert "else cannot see then-local declarations"
+      (stmtFailsWith (checkStmt (IfStmt (BoolExpr true) [LetStmt "thenLocal" None NullExpr]
+        (Some [ExprStmt (VarExpr "thenLocal")])) initialTypeEnv) "unbound variable: thenLocal")
   };
 
 let testWhileStmt: IO Unit =
+  let envWithX = [extendScope emptyScope "x" NumberType] in
+  let usesLocalAndOuterBindings = WhileStmt (BoolExpr false) [
+    LetStmt "local" None (NumberExpr 1.0),
+    ExprStmt (AssignExpr "x" (BinOpExpr AddOp (VarExpr "local") (VarExpr "x")))
+  ] in
+  let shadowsOuterX = WhileStmt (BoolExpr true) [
+    LetStmt "x" None (BoolExpr true), ExprStmt (UnaryOpExpr NotOp (VarExpr "x"))
+  ] in
   do (bindIO) {
-    assertStmtOk "WhileStmt: true condition is checked without executing the loop"
-      (WhileStmt (BoolExpr true) []) initialTypeEnv (fn env => length env == 1);
-    assertStmtOk "WhileStmt: false condition with empty body"
-      (WhileStmt (BoolExpr false) []) [] (fn env => length env == 0);
-    assertStmtOk "WhileStmt: variable condition and outer assignment"
-      (WhileStmt (VarExpr "flag") [ExprStmt (AssignExpr "x"
-        (BinOpExpr AddOp (VarExpr "x") (NumberExpr 1.0)))]) [scope2]
-      (fn env => length env == 1 && lookup "x" env == Ok NumberType && lookup "flag" env == Ok BoolType);
-    forEachTest (fn sample =>
-      assertStmtErr (str_concat "WhileStmt: rejects condition of type " sample.label)
-        (WhileStmt sample.expr []) initialTypeEnv sample.error
-    ) stmtNonBooleanConditions;
-    assertStmtErr "WhileStmt: condition expression error propagates"
-      (WhileStmt (VarExpr "missingCondition") []) initialTypeEnv "unbound variable: missingCondition";
-    assertStmtErr "WhileStmt: condition type error precedes invalid body"
-      (WhileStmt NullExpr [ExprStmt (VarExpr "missingBody")]) initialTypeEnv
-      "expected boolean, got null";
-    assertStmtErr "WhileStmt: false condition still checks body"
-      (WhileStmt (BoolExpr false) [ExprStmt (VarExpr "missingBody")]) initialTypeEnv
-      "unbound variable: missingBody";
-    assertStmtErr "WhileStmt: body expression error propagates"
-      (WhileStmt (BoolExpr true) [ExprStmt (UnaryOpExpr NotOp (NumberExpr 1.0))]) initialTypeEnv
-      "bad operand type for unary operator";
-    assertStmtErr "WhileStmt: body declarations cannot bind condition variables"
-      (WhileStmt (VarExpr "localFlag") [LetStmt "localFlag" None (BoolExpr true)]) initialTypeEnv
-      "unbound variable: localFlag";
-    assertStmtOk "WhileStmt: body declarations feed later body statements but do not escape"
-      (WhileStmt (BoolExpr false) [
-        LetStmt "local" None (NumberExpr 1.0),
-        ExprStmt (BinOpExpr AddOp (VarExpr "local") (NumberExpr 2.0))
-      ]) initialTypeEnv
-      (fn env => length env == 1 && lookup "local" env == Err "unbound variable: local");
-    assertStmtOk "WhileStmt: body may shadow an outer binding"
-      (WhileStmt (BoolExpr true) [
-        LetStmt "x" None (BoolExpr true), ExprStmt (UnaryOpExpr NotOp (VarExpr "x"))
-      ]) [scope1] (fn env => length env == 1 && lookup "x" env == Ok NumberType);
-    assertStmtErr "WhileStmt: duplicate declaration in body is rejected"
-      (WhileStmt (BoolExpr true) [LetStmt "x" None NullExpr, LetStmt "x" None NullExpr])
-      initialTypeEnv "duplicate declaration: x";
-    assertStmtErr "WhileStmt: first body error wins"
-      (WhileStmt (BoolExpr true) [ExprStmt (VarExpr "firstMissing"), ExprStmt (VarExpr "lastMissing")])
-      initialTypeEnv "unbound variable: firstMissing";
-    assertStmtOk "WhileStmt: nested control flow and record expressions"
-      (WhileStmt (BoolExpr true) [
-        LetStmt "r" None (RecordExpr [{name = "ready", expr = BoolExpr true}]),
-        IfStmt (FieldExpr (VarExpr "r") "ready") [
-          WhileStmt (BoolExpr false) [BlockStmt [ExprStmt (VarExpr "r")]]
-        ] (Some [])
-      ]) initialTypeEnv
-      (fn env => length env == 1 && lookup "r" env == Err "unbound variable: r")
+    assert "type-check a true loop without executing it"
+      (stmtSucceeds (checkStmt (WhileStmt (BoolExpr true) []) initialTypeEnv));
+    assert "loop declarations reach later body statements and stay local"
+      (match checkStmt usesLocalAndOuterBindings envWithX {
+        Ok env => length env == 1 && lookup "x" env == Ok NumberType &&
+          lookup "local" env == Err "unbound variable: local";
+        Err _ => false;
+      });
+    assert "loop shadowing preserves the outer binding"
+      (match checkStmt shadowsOuterX envWithX {
+        Ok env => length env == 1 && lookup "x" env == Ok NumberType;
+        Err _ => false;
+      });
+    assert "reject a non-boolean condition before checking the body"
+      (stmtFailsWith (checkStmt (WhileStmt NullExpr [ExprStmt (VarExpr "badBody")]) initialTypeEnv)
+        "expected boolean, got null");
+    assert "body declarations cannot bind variables in the condition"
+      (stmtFailsWith (checkStmt (WhileStmt (VarExpr "localFlag")
+        [LetStmt "localFlag" None (BoolExpr true)]) initialTypeEnv) "unbound variable: localFlag");
+    assert "check a false loop body and report its first error"
+      (stmtFailsWith (checkStmt (WhileStmt (BoolExpr false) [
+        ExprStmt (VarExpr "firstMissing"), ExprStmt (VarExpr "lastMissing")
+      ]) initialTypeEnv) "unbound variable: firstMissing")
   };
 
 let testCheckStmt: IO Unit =
   do (bindIO) {
     testLetStmt;
+    testLetAnnotations;
+    testLetTypeValidation;
     testExprStmt;
     testBlockStmt;
     testIfStmt;

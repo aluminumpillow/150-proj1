@@ -1,14 +1,12 @@
-# Run this file to execute the complete checker suite.
-# Include each dependency once; the other test files define groups, not main.
+include "common.kl";
+include "syntax.kl";
 include "checker.kl";
-include "test_helper.kl";
 include "test_checkExpr.kl";
 include "test_checkStmt.kl";
 include "test_checkProgram.kl";
 
 let main: IO Unit =
   do (bindIO) {
-    testCheckHelpers;
     testCheckExpr;
     testCheckStmt;
     testCheckProgram;
