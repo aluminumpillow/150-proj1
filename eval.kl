@@ -185,8 +185,81 @@ let applyBinOp op v1 v2 =
     _ => Err "not a strict operator";
   };
 
+# helper functions for 4e.
+# bindParams : [String] -> [Value] -> Env -> Store -> Result { env: Env, store: Store } RuntimeError
+letrec bindParams params args env store =
+  match params {
+    [] =>
+      match args {
+        [] => Ok { env = env, store = store };
+        _ => Err "too many arguments in function call";
+      };
+
+    x :: restParams =>
+      match args {
+        [] => Err "too few arguments in function call";
+        v :: restArgs =>
+          let allocated = alloc v store in
+          let nextEnv = bindEnvLocal x allocated.loc env in
+            bindParams restParams restArgs nextEnv allocated.store;
+      };
+  };
+
+# lookupField : String -> [{ name: String, val: Value }] -> Result Value RuntimeError
+letrec lookupField fieldName fields =
+  match fields {
+    [] =>
+      Err (str_concat "unknown record field: " fieldName);
+
+    f :: rest =>
+      if f.name == fieldName then
+        Ok f.val
+      else
+        lookupField fieldName rest;
+  };
+
 # evalExpr : Expr -> Env -> Store -> Result { val: Value, store: Store } RuntimeError
 letrec evalExpr expr env store =
+  // for lists in E-List 
+  letrec evalExprList exprs st =
+    match exprs {
+      [] =>
+        Ok { vals = [], store = st };
+
+      e :: rest =>
+        match (evalExpr e env st) {
+          Err err => Err err;
+          Ok r1 =>
+            match (evalExprList rest r1.store) {
+              Err err => Err err;
+              Ok r2 =>
+                Ok { vals = r1.val :: r2.vals, store = r2.store };
+            };
+        };
+    }
+  in
+  // for lists in E-List 
+  letrec evalRecordFields fields st =
+    match fields {
+      [] =>
+        Ok { fields = [], store = st };
+
+      fld :: rest =>
+        match (evalExpr fld.expr env st) {
+          Err err => Err err;
+          Ok r1 =>
+            match (evalRecordFields rest r1.store) {
+              Err err => Err err;
+              Ok r2 =>
+                Ok {
+                  fields = { name = fld.name, val = r1.val } :: r2.fields,
+                  store = r2.store
+                };
+            };
+        };
+    }
+  in
+
   match expr {
     // E-Number
     NumberExpr n => 
@@ -310,9 +383,64 @@ letrec evalExpr expr env store =
               };
           };
       };
-    
-    _ =>
-      Err "unimplemented expression"; // for 4e+
+    // E-Fun
+    FnExpr params retType body =>
+      let paramNames = map (fn p => p.name) params in
+        Ok {
+          val = ClosureVal paramNames body env,
+          store = store
+        };
+
+    // E-App
+    AppExpr callee args =>
+      match (evalExpr callee env store) {
+        Err err => Err err;
+        Ok r0 =>
+          match r0.val {
+            ClosureVal paramNames body closureEnv =>
+              match (evalExprList args r0.store) {
+                Err err => Err err;
+                Ok returnArgs =>
+                  match (bindParams paramNames returnArgs.vals (pushEnvScope closureEnv) returnArgs.store) {
+                    Err err => Err err;
+                    Ok bound =>
+                      evalExpr body bound.env bound.store;
+                  };
+              };
+
+            _ =>
+              Err "attempted to call a non-function";
+          };
+      };
+
+    // E-Record
+    RecordExpr fields =>
+      match (evalRecordFields fields store) {
+        Err err => Err err;
+        Ok res =>
+          Ok {
+            val = RecordVal res.fields,
+            store = res.store
+          };
+      };
+
+    // E-Field
+    FieldExpr target fieldName =>
+      match (evalExpr target env store) {
+        Err err => Err err;
+        Ok res =>
+          match res.val {
+            RecordVal fields =>
+              match (lookupField fieldName fields) {
+                Err err => Err err;
+                Ok v => Ok { val = v, store = res.store };
+              };
+
+            _ =>
+              Err "field access on a non-record";
+          };
+      };
   };
+
 
 let main = pureIO unit;
