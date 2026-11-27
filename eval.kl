@@ -19,6 +19,11 @@ type alias Store = {
   mem: Location -> (Option Value)
 };
 
+type alias Execution = {
+  env: Env,
+  store: Store
+};
+
 type alias RuntimeError = String;
 
 # emptyEnvScope : EnvScope
@@ -66,6 +71,7 @@ let emptyStore = {
   mem = fn _ => None
 };
 
+# alloc :: Value -> Store -> {loc: Location, store: Store}
 let alloc val store =
   let loc = store.nextLoc in
   let nextMem = fn query =>
@@ -443,4 +449,129 @@ letrec evalExpr expr env store =
   };
 
 
+# evalStmt : Stmt -> Env -> Store -> Result {env: Env, store: Store} RuntimeError
+letrec execStmt stmt env store = 
+
+  // S-SeqEmpty and S-SeqCons (same functionality as checkStmts)
+  #  [Stmt] -> Env -> Store -> Result (Env, Store) RuntimeError
+  letrec execStmts stmts env store =
+    match stmts {
+      [] => Ok ({env = env, store = store});
+
+      stmt :: rest =>
+        match execStmt stmt env store {
+          Err err => Err err;
+
+          Ok envStore =>
+            execStmts rest envStore.env envStore.store;  
+        };
+    }
+  in
+    match stmt {
+      LetStmt name _ expr =>
+        match evalExpr expr env store {
+          Err err => Err err;
+          Ok valStore =>
+            match env {
+              [] => Err "runtime environment has no current scope";
+              innerScope :: outerScopes =>
+                match innerScope name {
+                  Some _ => 
+                    Err (str_concat "duplicate declaration: " name);
+                  None =>
+                    let allocated = alloc valStore.val valStore.store in
+                    let nextEnv = bindEnvLocal name allocated.loc env in
+                      Ok ({env = nextEnv, store = allocated.store}); 
+                }; 
+            };
+        };
+
+      ExprStmt expr =>
+        match evalExpr expr env store {
+          Err err => Err err;
+          Ok valStore =>
+            Ok ({env = env, store = valStore.store}); 
+        };
+
+      BlockStmt block =>
+        match execStmts block (pushEnvScope env) store {
+          Err err => Err err;
+          Ok envStore => Ok ({env = env, store = envStore.store});
+        };
+
+      IfStmt expr ifBlock optionElseBlock =>
+        match evalExpr expr env store {
+          Err err => Err err;
+          Ok valStore => 
+            match valStore.val {
+              BoolVal bool =>
+                // true case
+                if bool then
+                  match execStmts ifBlock env valStore.store {
+                    Err err => Err err;
+                    Ok envStore => Ok ({env = env, store = envStore.store});
+                  }
+                else
+                  // false case, check first if else branch exists
+                  match optionElseBlock {
+                    Some elseBlock =>
+                      match execStmts elseBlock env valStore.store {
+                        Err err => Err err;
+                        Ok envStore => Ok ({env = env, store = envStore.store});
+                      };
+                    None => Err "no defined else-expression";
+                  };
+                  
+              _ => Err "if conditional expression is not boolean"; 
+            };
+        };
+
+      WhileStmt expr block =>
+        match evalExpr expr env store {
+          Err err => Err err;
+          Ok valStore =>
+            match valStore.val {
+              BoolVal bool =>
+                // true case
+                if bool then
+                  match execStmts block env valStore.store {
+                    Err err => Err err;
+                    Ok envStore =>
+                      match evalExpr expr env envStore.store {
+                        Err err => Err err;
+                        Ok valStore2 => Ok ({env = env, store = valStore2.store});
+                      }; 
+                  }
+                // else case
+                else
+                  Ok ({env = env, store = valStore.store});
+                
+              _ => Err "while conditional expression is not boolean"; 
+            }; 
+        };
+      
+      _ => Err "invalid statement expression";
+    };
+
+# execProgram :: Program -> Result Execution RuntimeError
+letrec execProgram program =
+  letrec execStmts stmts env store =
+    match stmts {
+      [] => Ok ({env = env, store = store});
+
+      stmt :: rest =>
+        match execStmt stmt env store {
+          Err err => Err err;
+
+          Ok envStore =>
+            execStmts rest envStore.env envStore.store;  
+        };
+    }
+  in
+    match execStmts program initialEnv emptyStore {
+      Err err => Err err;
+      Ok envStore => Ok envStore;
+    };
+  
+    
 let main = pureIO unit;
