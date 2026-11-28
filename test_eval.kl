@@ -9,7 +9,7 @@ include "test_evalProgram.kl";
 let main: IO Unit =
   do (bindIO) {
     testEvalExpr;
-    # testEvalStmt;
-    # testEvalProgram;
+    testEvalStmt;
+    testEvalProgram;
     outputLnIO "✅ All passing for evaluator tests"
   };
