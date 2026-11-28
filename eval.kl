@@ -1,5 +1,4 @@
-include "common.kl";
-include "syntax.kl";
+// removed inclusion of syntax and common since it will be included during testing
 
 type alias Location = Int;
 
@@ -369,7 +368,7 @@ letrec evalExpr expr env store =
                        match r2.val {
                          BoolVal b =>
                            Ok {val = BoolVal b, store = r2.store};
-                         _ => Err "right operand of && must be a boolean";
+                         _ => Err "right operand of || must be a boolean";
                        };
                   };
                   _ => Err "left operand of || must be a boolean";
@@ -404,15 +403,21 @@ letrec evalExpr expr env store =
         Ok r0 =>
           match r0.val {
             ClosureVal paramNames body closureEnv =>
-              match (evalExprList args r0.store) {
-                Err err => Err err;
-                Ok returnArgs =>
-                  match (bindParams paramNames returnArgs.vals (pushEnvScope closureEnv) returnArgs.store) {
-                    Err err => Err err;
-                    Ok bound =>
-                      evalExpr body bound.env bound.store;
-                  };
-              };
+              // arity check before arugment evaluation
+              if length args < length paramNames then
+                Err "too few arguments in function call"
+              else if length args > length paramNames then
+                Err "too many arguments in function call"
+              else
+                match (evalExprList args r0.store) {
+                  Err err => Err err;
+                  Ok returnArgs =>
+                    match (bindParams paramNames returnArgs.vals (pushEnvScope closureEnv) returnArgs.store) {
+                      Err err => Err err;
+                      Ok bound =>
+                        evalExpr body bound.env bound.store;
+                    };
+                };
 
             _ =>
               Err "attempted to call a non-function";
@@ -469,20 +474,20 @@ letrec execStmt stmt env store =
   in
     match stmt {
       LetStmt name _ expr =>
-        match evalExpr expr env store {
-          Err err => Err err;
-          Ok valStore =>
-            match env {
-              [] => Err "runtime environment has no current scope";
-              innerScope :: outerScopes =>
-                match innerScope name {
-                  Some _ => 
-                    Err (str_concat "duplicate declaration: " name);
-                  None =>
+        match env {
+          [] => Err "runtime environment has no current scope";
+          innerScope :: outerScopes =>
+            match innerScope name {
+              Some _ =>
+                Err (str_concat "duplicate declaration: " name);
+              None =>
+                match evalExpr expr env store {
+                  Err err => Err err;
+                  Ok valStore =>
                     let allocated = alloc valStore.val valStore.store in
                     let nextEnv = bindEnvLocal name allocated.loc env in
-                      Ok ({env = nextEnv, store = allocated.store}); 
-                }; 
+                      Ok ({env = nextEnv, store = allocated.store});
+                };
             };
         };
 
@@ -507,7 +512,7 @@ letrec execStmt stmt env store =
               BoolVal bool =>
                 // true case
                 if bool then
-                  match execStmts ifBlock env valStore.store {
+                  match execStmt (BlockStmt ifBlock) env valStore.store {
                     Err err => Err err;
                     Ok envStore => Ok ({env = env, store = envStore.store});
                   }
@@ -515,11 +520,11 @@ letrec execStmt stmt env store =
                   // false case, check first if else branch exists
                   match optionElseBlock {
                     Some elseBlock =>
-                      match execStmts elseBlock env valStore.store {
+                      match execStmt (BlockStmt elseBlock) env valStore.store {
                         Err err => Err err;
                         Ok envStore => Ok ({env = env, store = envStore.store});
                       };
-                    None => Err "no defined else-expression";
+                    None => Ok ({env = env, store = valStore.store}); // if no else branch exists, just return the evaluated store
                   };
                   
               _ => Err "if conditional expression is not boolean"; 
@@ -534,15 +539,12 @@ letrec execStmt stmt env store =
               BoolVal bool =>
                 // true case
                 if bool then
-                  match execStmts block env valStore.store {
+                  match execStmt (BlockStmt block) env valStore.store {
                     Err err => Err err;
                     Ok envStore =>
-                      match evalExpr expr env envStore.store {
-                        Err err => Err err;
-                        Ok valStore2 => Ok ({env = env, store = valStore2.store});
-                      }; 
+                     execStmt stmt env envStore.store;
                   }
-                // else case
+                // false case
                 else
                   Ok ({env = env, store = valStore.store});
                 

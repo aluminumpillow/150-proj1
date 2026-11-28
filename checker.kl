@@ -1,5 +1,4 @@
-include "common.kl";
-include "syntax.kl";
+// removed inclusion of syntax and common since it will be included during testing
 
 # inArr :: a -> [a] -> Bool
 letrec inArr elem arr =
