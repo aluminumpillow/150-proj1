@@ -1,0 +1,249 @@
+# Included by test_eval.kl. Programs are ASTs so section 5e errors reach execProgram.
+
+let testEvalProgramBasics: IO Unit =
+  do (bindIO) {
+    assert "S-Program / S-SeqEmpty: empty program has one empty global scope and empty store"
+      (match execProgram [] {
+        Ok res => length res.env == 1 && res.store.nextLoc == 0 &&
+          evalNamesMissing ["x"] res.env &&
+          (match res.store.mem 0 { None => true; Some _ => false; });
+        Err _ => false;
+      });
+    assertEvalProgram "top-level declarations remain available after the complete sequence" [
+      LetStmt "numeric" (Some NumberType) (NumberExpr 2.5),
+      LetStmt "flag" None (BoolExpr true), LetStmt "text" None (StringExpr "hello"),
+      LetStmt "nothing" None NullExpr, LetStmt "empty" None (RecordExpr []),
+      LetStmt "copy" None (VarExpr "numeric"), BlockStmt []
+    ] [
+      {name = "numeric", val = NumberVal 2.5}, {name = "flag", val = BoolVal true},
+      {name = "text", val = StringVal "hello"}, {name = "nothing", val = NullVal},
+      {name = "empty", val = RecordVal []}, {name = "copy", val = NumberVal 2.5}
+    ] [];
+    assertEvalProgram "each program starts with fresh globals and allocation state"
+      [LetStmt "global" None (NumberExpr 1.0)] [{name = "global", val = NumberVal 1.0}] [];
+    assert "a later invocation cannot see an earlier invocation's globals"
+      (evalErrorIs (execProgram [ExprStmt (VarExpr "global")]) "unbound variable: global");
+    assert "allocation restarts in another independent execution"
+      (match execProgram [LetStmt "global" None (BoolExpr true)] {
+        Ok res => res.store.nextLoc == 1 && evalBindingIs "global" (BoolVal true) res.env res.store;
+        Err _ => false;
+      });
+    assertEvalProgram "sibling blocks and the global scope may reuse a declaration name" [
+      BlockStmt [LetStmt "local" None (NumberExpr 1.0)],
+      BlockStmt [LetStmt "local" None (BoolExpr true)],
+      LetStmt "local" None (StringExpr "global")
+    ] [{name = "local", val = StringVal "global"}] []
+  };
+
+let testEvalProgramExamples: IO Unit =
+  let numberFunction = FunctionType [{name = "x", typ = NumberType}] NumberType in
+  do (bindIO) {
+    assertEvalProgram "spec 1c: factorial" [
+      LetStmt "n" (Some NumberType) (NumberExpr 5.0), LetStmt "result" None (NumberExpr 1.0),
+      WhileStmt (BinOpExpr GtOp (VarExpr "n") (NumberExpr 1.0)) [
+        ExprStmt (AssignExpr "result" (BinOpExpr MulOp (VarExpr "result") (VarExpr "n"))),
+        ExprStmt (AssignExpr "n" (BinOpExpr SubOp (VarExpr "n") (NumberExpr 1.0)))
+      ]
+    ] [{name = "n", val = NumberVal 1.0}, {name = "result", val = NumberVal 120.0}] [];
+    assertEvalProgram "spec 1c: closure sees mutable global storage" [
+      LetStmt "counter" None (NumberExpr 0.0),
+      LetStmt "next" None (FnExpr [] NumberType
+        (AssignExpr "counter" (BinOpExpr AddOp (VarExpr "counter") (NumberExpr 1.0)))),
+      LetStmt "a" None (AppExpr (VarExpr "next") []),
+      LetStmt "b" None (AppExpr (VarExpr "next") [])
+    ] [{name = "counter", val = NumberVal 2.0}, {name = "a", val = NumberVal 1.0}, {name = "b", val = NumberVal 2.0}] [];
+    assertEvalProgram "spec 1c: makeAdder retains a returned function's parameter binding" [
+      LetStmt "makeAdder" None (FnExpr [{name = "n", typ = NumberType}] numberFunction
+        (FnExpr [{name = "x", typ = NumberType}] NumberType (BinOpExpr AddOp (VarExpr "x") (VarExpr "n")))),
+      LetStmt "addFive" None (AppExpr (VarExpr "makeAdder") [NumberExpr 5.0]),
+      LetStmt "result" None (AppExpr (VarExpr "addFive") [NumberExpr 10.0])
+    ] [{name = "result", val = NumberVal 15.0}] ["n", "x"];
+    assertEvalProgram "spec 1c: record fields" [
+      LetStmt "student" None (RecordExpr [
+        {name = "name", expr = StringExpr "Alice"}, {name = "year", expr = NumberExpr 2026.0}
+      ]),
+      LetStmt "name" None (FieldExpr (VarExpr "student") "name"),
+      LetStmt "nextYear" None (BinOpExpr AddOp (FieldExpr (VarExpr "student") "year") (NumberExpr 1.0))
+    ] [{name = "name", val = StringVal "Alice"}, {name = "nextYear", val = NumberVal 2027.0}] []
+  };
+
+let testEvalProgramClosures: IO Unit =
+  do (bindIO) {
+    assertEvalProgram "spec 6a: closure escapes a block and retains its local store entry" [
+      LetStmt "f" None (FnExpr [] NumberType (NumberExpr 0.0)),
+      BlockStmt [LetStmt "x" None (NumberExpr 41.0),
+        ExprStmt (AssignExpr "f" (FnExpr [] NumberType (BinOpExpr AddOp (VarExpr "x") (NumberExpr 1.0))))],
+      LetStmt "result" None (AppExpr (VarExpr "f") [])
+    ] [{name = "result", val = NumberVal 42.0}] ["x"];
+    assertEvalProgram "spec 6a: lexical scope and shadowing" [
+      LetStmt "x" None (NumberExpr 10.0), LetStmt "f" None (FnExpr [] NumberType (VarExpr "x")),
+      BlockStmt [LetStmt "x" None (NumberExpr 20.0),
+        ExprStmt (AssignExpr "x" (BinOpExpr AddOp (VarExpr "x") (NumberExpr 1.0)))],
+      LetStmt "result" None (AppExpr (VarExpr "f") [])
+    ] [{name = "x", val = NumberVal 10.0}, {name = "result", val = NumberVal 10.0}] [];
+    assertEvalProgram "closure body uses its definition environment when called from a shadowing scope" [
+      LetStmt "x" None (NumberExpr 10.0), LetStmt "result" None (NumberExpr 0.0),
+      LetStmt "f" None (FnExpr [] NumberType (VarExpr "x")),
+      BlockStmt [LetStmt "x" None (NumberExpr 99.0),
+        ExprStmt (AssignExpr "result" (AppExpr (VarExpr "f") []))]
+    ] [{name = "x", val = NumberVal 10.0}, {name = "result", val = NumberVal 10.0}] [];
+    assertEvalProgram "arguments use the caller environment even when the closure captured another scope" [
+      LetStmt "x" None (NumberExpr 10.0), LetStmt "result" None (NumberExpr 0.0),
+      LetStmt "f" None (FnExpr [{name = "p", typ = NumberType}] NumberType (VarExpr "p")),
+      BlockStmt [LetStmt "x" None (NumberExpr 99.0),
+        ExprStmt (AssignExpr "result" (AppExpr (VarExpr "f") [VarExpr "x"]))]
+    ] [{name = "x", val = NumberVal 10.0}, {name = "result", val = NumberVal 99.0}] ["p"];
+    assertEvalProgram "spec 6a: independent mutable closure state" [
+      LetStmt "makeCounter" None (FnExpr [{name = "start", typ = NumberType}] (FunctionType [] NumberType)
+        (FnExpr [] NumberType (AssignExpr "start" (BinOpExpr AddOp (VarExpr "start") (NumberExpr 1.0))))),
+      LetStmt "first" None (AppExpr (VarExpr "makeCounter") [NumberExpr 0.0]),
+      LetStmt "second" None (AppExpr (VarExpr "makeCounter") [NumberExpr 10.0]),
+      LetStmt "a" None (AppExpr (VarExpr "first") []),
+      LetStmt "b" None (AppExpr (VarExpr "first") []),
+      LetStmt "c" None (AppExpr (VarExpr "second") []),
+      LetStmt "d" None (AppExpr (VarExpr "first") [])
+    ] [
+      {name = "a", val = NumberVal 1.0}, {name = "b", val = NumberVal 2.0},
+      {name = "c", val = NumberVal 11.0}, {name = "d", val = NumberVal 3.0}
+    ] ["start"];
+    assertEvalProgram "spec 6a: parameter assignment does not reassign the caller's variable" [
+      LetStmt "bump" None (FnExpr [{name = "x", typ = NumberType}] NumberType
+        (AssignExpr "x" (BinOpExpr AddOp (VarExpr "x") (NumberExpr 1.0)))),
+      LetStmt "n" None (NumberExpr 5.0),
+      LetStmt "result" None (AppExpr (VarExpr "bump") [VarExpr "n"])
+    ] [{name = "n", val = NumberVal 5.0}, {name = "result", val = NumberVal 6.0}] ["x"];
+    assertEvalProgram "escaping loop closures retain separate locations for each iteration" [
+      LetStmt "i" None (NumberExpr 0.0),
+      LetStmt "first" None (FnExpr [] NumberType (NumberExpr 99.0)),
+      LetStmt "second" None (FnExpr [] NumberType (NumberExpr 99.0)),
+      WhileStmt (BinOpExpr LtOp (VarExpr "i") (NumberExpr 2.0)) [
+        LetStmt "local" None (VarExpr "i"),
+        IfStmt (BinOpExpr EqOp (VarExpr "i") (NumberExpr 0.0))
+          [ExprStmt (AssignExpr "first" (FnExpr [] NumberType (VarExpr "local")))]
+          (Some [ExprStmt (AssignExpr "second" (FnExpr [] NumberType (VarExpr "local")))]),
+        ExprStmt (AssignExpr "i" (BinOpExpr AddOp (VarExpr "i") (NumberExpr 1.0)))
+      ],
+      LetStmt "a" None (AppExpr (VarExpr "first") []),
+      LetStmt "b" None (AppExpr (VarExpr "second") [])
+    ] [{name = "i", val = NumberVal 2.0}, {name = "a", val = NumberVal 0.0}, {name = "b", val = NumberVal 1.0}] ["local"];
+    assertEvalProgram "assignment to an existing function variable can create recursion" [
+      LetStmt "f" None (FnExpr [{name = "n", typ = NumberType}] BoolType (BoolExpr false)),
+      ExprStmt (AssignExpr "f" (FnExpr [{name = "n", typ = NumberType}] BoolType
+        (BinOpExpr OrOp (BinOpExpr EqOp (VarExpr "n") (NumberExpr 0.0))
+          (AppExpr (VarExpr "f") [BinOpExpr SubOp (VarExpr "n") (NumberExpr 1.0)])))),
+      LetStmt "result" None (AppExpr (VarExpr "f") [NumberExpr 5.0])
+    ] [{name = "result", val = BoolVal true}] ["n"]
+  };
+
+let testEvalProgramHigherOrder: IO Unit =
+  let numberFunction = FunctionType [{name = "x", typ = NumberType}] NumberType in
+  let increment = FnExpr [{name = "n", typ = NumberType}] NumberType
+    (BinOpExpr AddOp (VarExpr "n") (NumberExpr 1.0)) in
+  do (bindIO) {
+    assertEvalProgram "spec 6a: pass functions as arguments" [
+      LetStmt "applyTwice" None (FnExpr [{name = "f", typ = numberFunction}, {name = "x", typ = NumberType}] NumberType
+        (AppExpr (VarExpr "f") [AppExpr (VarExpr "f") [VarExpr "x"]])),
+      LetStmt "increment" None increment,
+      LetStmt "result" None (AppExpr (VarExpr "applyTwice") [VarExpr "increment", NumberExpr 10.0])
+    ] [{name = "result", val = NumberVal 12.0}] ["f", "x", "n"];
+    assertEvalProgram "spec 6a: composition and chained calls" [
+      LetStmt "compose" None (FnExpr [{name = "f", typ = numberFunction}, {name = "g", typ = numberFunction}] numberFunction
+        (FnExpr [{name = "x", typ = NumberType}] NumberType
+          (AppExpr (VarExpr "f") [AppExpr (VarExpr "g") [VarExpr "x"]]))),
+      LetStmt "double" None (FnExpr [{name = "x", typ = NumberType}] NumberType (BinOpExpr MulOp (VarExpr "x") (NumberExpr 2.0))),
+      LetStmt "increment" None increment,
+      LetStmt "result" None (AppExpr (AppExpr (VarExpr "compose") [VarExpr "double", VarExpr "increment"]) [NumberExpr 5.0])
+    ] [{name = "result", val = NumberVal 12.0}] ["f", "g", "x"];
+    assertEvalProgram "spec 6a: functions stored in records" [
+      LetStmt "operations" None (RecordExpr [
+        {name = "square", expr = FnExpr [{name = "x", typ = NumberType}] NumberType (BinOpExpr MulOp (VarExpr "x") (VarExpr "x"))},
+        {name = "greet", expr = FnExpr [{name = "name", typ = StringType}] StringType (BinOpExpr AddOp (StringExpr "Hello, ") (VarExpr "name"))}
+      ]),
+      LetStmt "result" None (AppExpr (FieldExpr (VarExpr "operations") "square") [NumberExpr 4.0]),
+      LetStmt "message" None (AppExpr (FieldExpr (VarExpr "operations") "greet") [StringExpr "MiniTS"])
+    ] [{name = "result", val = NumberVal 16.0}, {name = "message", val = StringVal "Hello, MiniTS"}] ["x", "name"]
+  };
+
+let testEvalProgramOrderAndRecords: IO Unit =
+  let increment = AssignExpr "x" (BinOpExpr AddOp (VarExpr "x") (NumberExpr 1.0)) in
+  do (bindIO) {
+    assertEvalProgram "spec 6a: left-to-right arguments and record fields" [
+      LetStmt "x" None (NumberExpr 0.0),
+      LetStmt "pair" None (FnExpr [{name = "a", typ = NumberType}, {name = "b", typ = NumberType}]
+        (RecordType [{name = "first", typ = NumberType}, {name = "second", typ = NumberType}])
+        (RecordExpr [{name = "first", expr = VarExpr "a"}, {name = "second", expr = VarExpr "b"}])),
+      LetStmt "p" None (AppExpr (VarExpr "pair") [increment, increment]),
+      LetStmt "r" None (RecordExpr [{name = "first", expr = increment}, {name = "second", expr = increment}])
+    ] [
+      {name = "p", val = RecordVal [{name = "first", val = NumberVal 1.0}, {name = "second", val = NumberVal 2.0}]},
+      {name = "r", val = RecordVal [{name = "first", val = NumberVal 3.0}, {name = "second", val = NumberVal 4.0}]},
+      {name = "x", val = NumberVal 4.0}
+    ] ["a", "b"];
+    assertEvalProgram "spec 6a: all short-circuit effects" [
+      LetStmt "x" None (NumberExpr 0.0),
+      LetStmt "a" None (BinOpExpr AndOp (BoolExpr false) (BinOpExpr EqOp (AssignExpr "x" (NumberExpr 1.0)) (NumberExpr 1.0))),
+      LetStmt "b" None (BinOpExpr OrOp (BoolExpr true) (BinOpExpr EqOp (AssignExpr "x" (NumberExpr 2.0)) (NumberExpr 2.0))),
+      LetStmt "c" None (BinOpExpr AndOp (BoolExpr true)
+        (BinOpExpr EqOp (AssignExpr "x" (BinOpExpr AddOp (VarExpr "x") (NumberExpr 3.0))) (NumberExpr 3.0))),
+      LetStmt "d" None (BinOpExpr OrOp (BoolExpr false)
+        (BinOpExpr EqOp (AssignExpr "x" (BinOpExpr AddOp (VarExpr "x") (NumberExpr 4.0))) (NumberExpr 7.0)))
+    ] [
+      {name = "x", val = NumberVal 7.0}, {name = "a", val = BoolVal false},
+      {name = "b", val = BoolVal true}, {name = "c", val = BoolVal true}, {name = "d", val = BoolVal true}
+    ] [];
+    assertEvalProgram "spec 6a: effects in a false loop condition" [
+      LetStmt "x" None (NumberExpr 0.0),
+      WhileStmt (BinOpExpr LtOp increment (NumberExpr 3.0)) []
+    ] [{name = "x", val = NumberVal 3.0}] [];
+    assertEvalProgram "record values remain immutable when one variable is reassigned" [
+      LetStmt "a" None (RecordExpr [{name = "value", expr = NumberExpr 1.0}]),
+      LetStmt "b" None (VarExpr "a"),
+      ExprStmt (AssignExpr "a" (RecordExpr [{name = "value", expr = NumberExpr 2.0}])),
+      LetStmt "result" None (FieldExpr (VarExpr "b") "value")
+    ] [
+      {name = "a", val = RecordVal [{name = "value", val = NumberVal 2.0}]},
+      {name = "b", val = RecordVal [{name = "value", val = NumberVal 1.0}]},
+      {name = "result", val = NumberVal 1.0}
+    ] []
+  };
+
+let testEvalProgramErrors: IO Unit =
+  do (bindIO) {
+    forEachEvalTest (fn test => assert test.label (evalErrorIs (execProgram test.program) test.error)) [
+      {label = "program returns the first error and never executes the following infinite loop", program = [ExprStmt (VarExpr "first"), WhileStmt (BoolExpr true) []], error = "unbound variable: first"},
+      {label = "program propagates a later error after successful declarations", program = [LetStmt "x" None (NumberExpr 1.0), ExprStmt evalDivZero, WhileStmt (BoolExpr true) []], error = "division by zero"},
+      {label = "program propagates a nested block error without a final Execution", program = [BlockStmt [BlockStmt [ExprStmt evalDivZero]], WhileStmt (BoolExpr true) []], error = "division by zero"},
+      {label = "program propagates a selected branch error", program = [IfStmt (BoolExpr false) [] (Some [ExprStmt (VarExpr "elseError")]), WhileStmt (BoolExpr true) []], error = "unbound variable: elseError"},
+      {label = "program propagates a loop body error", program = [WhileStmt (BoolExpr true) [ExprStmt evalDivZero], WhileStmt (BoolExpr true) []], error = "division by zero"},
+      {label = "program propagates a call body error", program = [LetStmt "f" None (FnExpr [] NumberType evalDivZero), ExprStmt (AppExpr (VarExpr "f") []), WhileStmt (BoolExpr true) []], error = "division by zero"},
+      {label = "program propagates a record field error", program = [LetStmt "r" None (RecordExpr [{name = "bad", expr = evalDivZero}, {name = "later", expr = evalUnreachable}])], error = "division by zero"},
+      {label = "program duplicate declaration precedes initializer execution", program = [LetStmt "x" None (NumberExpr 1.0), LetStmt "x" None evalUnreachable], error = "duplicate declaration: x"},
+      {label = "program assignment target checked before RHS", program = [ExprStmt (AssignExpr "missing" evalUnreachable)], error = "unbound variable: missing"},
+      {label = "program call shape checked before arguments", program = [ExprStmt (AppExpr NullExpr [evalUnreachable])], error = "attempted to call a non-function"},
+      {label = "program arity checked before arguments", program = [ExprStmt (AppExpr (FnExpr [] NumberType (NumberExpr 1.0)) [evalUnreachable])], error = "too many arguments in function call"},
+      {label = "program rejects nonboolean if condition before branch execution", program = [IfStmt (NumberExpr 1.0) [WhileStmt (BoolExpr true) []] None], error = "if conditional expression is not boolean"},
+      {label = "program rejects nonboolean while condition before body execution", program = [WhileStmt (StringExpr "true") [WhileStmt (BoolExpr true) []]], error = "while conditional expression is not boolean"},
+      {label = "program reports absent fields", program = [ExprStmt (FieldExpr (RecordExpr []) "missing")], error = "unknown record field: missing"},
+      {label = "block locals do not become globals", program = [BlockStmt [LetStmt "local" None NullExpr], ExprStmt (VarExpr "local")], error = "unbound variable: local"},
+      {label = "a function does not gain access to later declarations", program = [LetStmt "f" None (FnExpr [] NumberType (VarExpr "later")), LetStmt "later" None (NumberExpr 1.0), ExprStmt (AppExpr (VarExpr "f") [])], error = "unbound variable: later"},
+      {label = "a let-bound function is not implicitly recursive", program = [LetStmt "f" None (FnExpr [] NumberType (AppExpr (VarExpr "f") [])), ExprStmt (AppExpr (VarExpr "f") [])], error = "unbound variable: f"}
+    ];
+    assertEvalProgram "5e: unreachable Boolean operands and branches do not propagate errors" [
+      LetStmt "a" None (BinOpExpr AndOp (BoolExpr false) evalDivZero),
+      LetStmt "b" None (BinOpExpr OrOp (BoolExpr true) (VarExpr "missing")),
+      IfStmt (BoolExpr false) [ExprStmt evalDivZero] None,
+      IfStmt (BoolExpr true) [] (Some [ExprStmt (VarExpr "missing")]),
+      WhileStmt (BoolExpr false) [ExprStmt evalDivZero]
+    ] [{name = "a", val = BoolVal false}, {name = "b", val = BoolVal true}] []
+  };
+
+let testEvalProgram: IO Unit =
+  do (bindIO) {
+    testEvalProgramBasics;
+    testEvalProgramExamples;
+    testEvalProgramClosures;
+    testEvalProgramHigherOrder;
+    testEvalProgramOrderAndRecords;
+    testEvalProgramErrors;
+    outputLnIO "✅ All passing for execProgram tests"
+  };

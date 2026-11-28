@@ -1,0 +1,222 @@
+# Included by test_eval.kl. These tests execute one statement in a supplied state.
+
+let testEvalLetStmt: IO Unit =
+  let state = evalWithBindings [{name = "x", val = NumberVal 10.0}] in
+  do (bindIO) {
+    assert "S-Let: introduce a binding in the current scope"
+      (evalStateIs (execStmt (LetStmt "x" None (NumberExpr 1.0)) initialEnv emptyStore)
+        [{name = "x", val = NumberVal 1.0}] [] 1);
+    assert "S-LetAnn: annotation has no runtime effect"
+      (evalStateIs (execStmt (LetStmt "x" (Some BoolType) (NumberExpr 1.0)) initialEnv emptyStore)
+        [{name = "x", val = NumberVal 1.0}] [] 1);
+    assert "S-Let: initializer effects survive allocation"
+      (evalStateIs (execStmt (LetStmt "y" None (AssignExpr "x" (NumberExpr 2.0))) state.env state.store)
+        [{name = "x", val = NumberVal 2.0}, {name = "y", val = NumberVal 2.0}] [] 1);
+    assert "S-Let: shadowing initializer reads the outer binding"
+      (match execStmt (LetStmt "x" None (BinOpExpr AddOp (VarExpr "x") (NumberExpr 1.0)))
+        (pushEnvScope state.env) state.store {
+        Ok res => length res.env == 2 &&
+          evalBindingIs "x" (NumberVal 11.0) res.env res.store &&
+          evalBindingIs "x" (NumberVal 10.0) state.env res.store &&
+          lookupEnv "x" res.env != lookupEnv "x" state.env;
+        Err _ => false;
+      });
+    assert "S-Let: self-reference does not introduce a binding early"
+      (evalErrorIs (execStmt (LetStmt "self" None (VarExpr "self")) initialEnv emptyStore)
+        "unbound variable: self");
+    assert "S-Let: initializer error propagates unchanged"
+      (evalErrorIs (execStmt (LetStmt "new" None evalDivZero) state.env state.store) "division by zero");
+    assert "5e: duplicate declaration precedes an erroneous initializer"
+      (evalErrorIs (execStmt (LetStmt "x" None evalDivZero) state.env state.store) "duplicate declaration: x");
+    assert "5e: duplicate declaration never evaluates a divergent initializer"
+      (evalErrorIs (execStmt (LetStmt "x" None evalUnreachable) state.env state.store) "duplicate declaration: x");
+    assert "5e: an absent current scope is rejected before the initializer"
+      (evalErrorIs (execStmt (LetStmt "x" None evalUnreachable) [] emptyStore)
+        "runtime environment has no current scope");
+    assert "S-Let: a fresh location preserves the old store domain"
+      (match execStmt (LetStmt "y" None (NumberExpr 20.0)) state.env state.store {
+        Ok res => match lookupEnv "x" res.env, lookupEnv "y" res.env {
+          Ok x, Ok y => x != y &&
+            evalBindingIs "x" (NumberVal 10.0) res.env res.store &&
+            evalBindingIs "y" (NumberVal 20.0) res.env res.store &&
+            res.store.nextLoc == state.store.nextLoc + 1;
+          _, _ => false;
+        };
+        Err _ => false;
+      })
+  };
+
+let testEvalExprStmt: IO Unit =
+  let state = evalWithBindings [{name = "x", val = NumberVal 1.0}] in
+  do (bindIO) {
+    assert "S-ExprStmt: discard the value and keep assignment effects"
+      (evalStateIs (execStmt (ExprStmt (AssignExpr "x" (NumberExpr 2.0))) state.env state.store)
+        [{name = "x", val = NumberVal 2.0}] [] 1);
+    assert "S-ExprStmt: function parameters do not escape the expression"
+      (evalStateIs (execStmt (ExprStmt (AppExpr
+        (FnExpr [{name = "p", typ = NumberType}] NumberType (VarExpr "p")) [NumberExpr 3.0]))
+        state.env state.store) [{name = "x", val = NumberVal 1.0}] ["p"] 1);
+    assert "S-ExprStmt: propagate expression errors without returning an execution"
+      (evalErrorIs (execStmt (ExprStmt evalDivZero) state.env state.store) "division by zero")
+  };
+
+let testEvalBlockStmt: IO Unit =
+  let state = evalWithBindings [{name = "x", val = NumberVal 10.0}] in
+  do (bindIO) {
+    assert "S-Block / S-SeqEmpty: empty block restores incoming scope depth"
+      (evalStateIs (execStmt (BlockStmt []) state.env state.store)
+        [{name = "x", val = NumberVal 10.0}] [] 1);
+    assert "S-SeqCons: declarations reach subsequent statements within a block"
+      (evalStateIs (execStmt (BlockStmt [
+        LetStmt "local" None (NumberExpr 2.0),
+        ExprStmt (AssignExpr "x" (BinOpExpr AddOp (VarExpr "local") (NumberExpr 1.0)))
+      ]) state.env state.store) [{name = "x", val = NumberVal 3.0}] ["local"] 1);
+    assert "S-Block: shadowing and nested updates preserve the original outer binding"
+      (evalStateIs (execStmt (BlockStmt [
+        LetStmt "x" None (NumberExpr 20.0),
+        BlockStmt [ExprStmt (AssignExpr "x" (NumberExpr 21.0))]
+      ]) state.env state.store) [{name = "x", val = NumberVal 10.0}] [] 1);
+    assert "S-Block: assignments to an unshadowed outer variable persist"
+      (evalStateIs (execStmt (BlockStmt [BlockStmt [ExprStmt (AssignExpr "x" (NumberExpr 42.0))]])
+        state.env state.store) [{name = "x", val = NumberVal 42.0}] [] 1);
+    assert "S-Block: restore all incoming scopes, not just a single global scope"
+      (evalStateIs (execStmt (BlockStmt []) (pushEnvScope state.env) state.store)
+        [{name = "x", val = NumberVal 10.0}] [] 2);
+    assert "S-SeqCons: duplicate locals rejected before their initializer"
+      (evalErrorIs (execStmt (BlockStmt [LetStmt "local" None NullExpr, LetStmt "local" None evalUnreachable])
+        state.env state.store) "duplicate declaration: local");
+    assert "5e: block stops at its first error and skips a divergent later statement"
+      (evalErrorIs (execStmt (BlockStmt [
+        ExprStmt (VarExpr "first"), WhileStmt (BoolExpr true) []
+      ]) state.env state.store) "unbound variable: first");
+    assert "5e: a later nested block error propagates through successful earlier statements"
+      (evalErrorIs (execStmt (BlockStmt [
+        LetStmt "local" None (NumberExpr 1.0), BlockStmt [ExprStmt evalDivZero],
+        WhileStmt (BoolExpr true) []
+      ]) state.env state.store) "division by zero");
+    assert "S-Block: hidden local store entries remain allocated after exit"
+      (match execStmt (BlockStmt [LetStmt "local" None (NumberExpr 41.0)]) initialEnv emptyStore {
+        Ok res => evalNamesMissing ["local"] res.env && res.store.nextLoc == 1 &&
+          (match lookupStore 0 res.store { Ok (NumberVal n) => n == 41.0; _ => false; });
+        Err _ => false;
+      })
+  };
+
+let testEvalIfStmt: IO Unit =
+  let state = evalWithBindings [{name = "x", val = NumberVal 0.0}] in
+  do (bindIO) {
+    assert "S-IfTrue: execute then branch and skip divergent else branch"
+      (evalStateIs (execStmt (IfStmt (BoolExpr true)
+        [ExprStmt (AssignExpr "x" (NumberExpr 1.0))]
+        (Some [WhileStmt (BoolExpr true) []])) state.env state.store)
+        [{name = "x", val = NumberVal 1.0}] [] 1);
+    assert "S-IfFalse: execute else branch and skip divergent then branch"
+      (evalStateIs (execStmt (IfStmt (BoolExpr false)
+        [WhileStmt (BoolExpr true) []]
+        (Some [ExprStmt (AssignExpr "x" (NumberExpr 2.0))])) state.env state.store)
+        [{name = "x", val = NumberVal 2.0}] [] 1);
+    assert "omitted else is an empty block"
+      (evalStateIs (execStmt (IfStmt (BoolExpr false) [ExprStmt evalDivZero] None) state.env state.store)
+        [{name = "x", val = NumberVal 0.0}] [] 1);
+    assert "an empty selected branch succeeds"
+      (evalStateIs (execStmt (IfStmt (BoolExpr true) [] None) state.env state.store)
+        [{name = "x", val = NumberVal 0.0}] [] 1);
+    assert "a false condition retains its effects even without an else"
+      (evalStateIs (execStmt (IfStmt
+        (BinOpExpr LtOp (AssignExpr "x" (NumberExpr 1.0)) (NumberExpr 0.0)) [] None)
+        state.env state.store) [{name = "x", val = NumberVal 1.0}] [] 1);
+    assert "a true condition's effects are visible to the selected branch"
+      (evalStateIs (execStmt (IfStmt
+        (BinOpExpr EqOp (AssignExpr "x" (NumberExpr 1.0)) (NumberExpr 1.0))
+        [ExprStmt (AssignExpr "x" (BinOpExpr AddOp (VarExpr "x") (NumberExpr 2.0)))] None)
+        state.env state.store) [{name = "x", val = NumberVal 3.0}] [] 1);
+    forEachEvalTest (fn selected =>
+      assert "both conditional branches allow shadowing and restore the incoming environment"
+        (evalStateIs (execStmt (IfStmt (BoolExpr selected)
+          [LetStmt "x" None (NumberExpr 10.0), LetStmt "local" None NullExpr]
+          (Some [LetStmt "x" None (NumberExpr 20.0), LetStmt "local" None NullExpr])) state.env state.store)
+          [{name = "x", val = NumberVal 0.0}] ["local"] 1)) [true, false];
+    assert "5e: condition error precedes either branch"
+      (evalErrorIs (execStmt (IfStmt evalDivZero [WhileStmt (BoolExpr true) []]
+        (Some [WhileStmt (BoolExpr true) []])) state.env state.store) "division by zero");
+    assert "5e: invalid condition shape precedes either branch"
+      (evalErrorIs (execStmt (IfStmt (NumberExpr 1.0) [WhileStmt (BoolExpr true) []]
+        (Some [WhileStmt (BoolExpr true) []])) state.env state.store)
+        "if conditional expression is not boolean");
+    assert "5e: selected then branch error propagates and does not execute else"
+      (evalErrorIs (execStmt (IfStmt (BoolExpr true) [ExprStmt (VarExpr "thenError")]
+        (Some [WhileStmt (BoolExpr true) []])) state.env state.store) "unbound variable: thenError");
+    assert "5e: selected else branch error propagates and skips later statements"
+      (evalErrorIs (execStmt (IfStmt (BoolExpr false) [WhileStmt (BoolExpr true) []]
+        (Some [ExprStmt evalDivZero, WhileStmt (BoolExpr true) []])) state.env state.store) "division by zero")
+  };
+
+let testEvalWhileStmt: IO Unit =
+  let state = evalWithBindings [{name = "x", val = NumberVal 0.0}] in
+  let increment = ExprStmt (AssignExpr "x" (BinOpExpr AddOp (VarExpr "x") (NumberExpr 1.0))) in
+  do (bindIO) {
+    assert "S-WhileFalse: skip a divergent body"
+      (evalStateIs (execStmt (WhileStmt (BoolExpr false) [WhileStmt (BoolExpr true) []]) state.env state.store)
+        [{name = "x", val = NumberVal 0.0}] [] 1);
+    assert "S-WhileTrue: repeat until false"
+      (evalStateIs (execStmt (WhileStmt (BinOpExpr LtOp (VarExpr "x") (NumberExpr 3.0)) [increment])
+        state.env state.store) [{name = "x", val = NumberVal 3.0}] [] 1);
+    assert "false condition on the first check preserves its assignment"
+      (evalStateIs (execStmt (WhileStmt
+        (BinOpExpr LtOp (AssignExpr "x" (NumberExpr 1.0)) (NumberExpr 0.0)) [ExprStmt evalDivZero])
+        state.env state.store) [{name = "x", val = NumberVal 1.0}] [] 1);
+    assert "condition evaluated once per check, including the final false check"
+      (evalStateIs (execStmt (WhileStmt
+        (BinOpExpr LtOp (AssignExpr "x" (BinOpExpr AddOp (VarExpr "x") (NumberExpr 1.0))) (NumberExpr 3.0)) [])
+        state.env state.store) [{name = "x", val = NumberVal 3.0}] [] 1);
+    assert "each body execution has a fresh scope for declarations"
+      (evalStateIs (execStmt (WhileStmt (BinOpExpr LtOp (VarExpr "x") (NumberExpr 3.0)) [
+        LetStmt "local" None (VarExpr "x"), increment
+      ]) state.env state.store) [{name = "x", val = NumberVal 3.0}] ["local"] 1);
+    assert "loop body shadowing leaves an outer binding intact"
+      (let withOuter = evalWithBindings [{name = "x", val = NumberVal 10.0}, {name = "i", val = NumberVal 0.0}] in
+       evalStateIs (execStmt (WhileStmt (BinOpExpr LtOp (VarExpr "i") (NumberExpr 2.0)) [
+         LetStmt "x" None (NumberExpr 20.0),
+         ExprStmt (AssignExpr "x" (NumberExpr 21.0)),
+         ExprStmt (AssignExpr "i" (BinOpExpr AddOp (VarExpr "i") (NumberExpr 1.0)))
+       ]) withOuter.env withOuter.store)
+       [{name = "x", val = NumberVal 10.0}, {name = "i", val = NumberVal 2.0}] [] 1);
+    assert "5e: initial condition error skips the loop body"
+      (evalErrorIs (execStmt (WhileStmt evalDivZero [WhileStmt (BoolExpr true) []]) state.env state.store)
+        "division by zero");
+    assert "5e: invalid condition shape skips the loop body"
+      (evalErrorIs (execStmt (WhileStmt NullExpr [WhileStmt (BoolExpr true) []]) state.env state.store)
+        "while conditional expression is not boolean");
+    assert "5e: body error stops its sequence and prevents the next condition evaluation"
+      (let withFlag = evalWithBindings [{name = "flag", val = BoolVal true}] in
+       evalErrorIs (execStmt (WhileStmt (BinOpExpr OrOp (VarExpr "flag") evalUnreachable) [
+         ExprStmt (AssignExpr "flag" (BoolExpr false)),
+         ExprStmt (VarExpr "bodyError"), WhileStmt (BoolExpr true) []
+       ]) withFlag.env withFlag.store) "unbound variable: bodyError");
+    assert "5e: a later iteration's condition error propagates"
+      (evalErrorIs (execStmt (WhileStmt
+        (BinOpExpr GtOp (BinOpExpr DivOp (NumberExpr 1.0)
+          (BinOpExpr SubOp (NumberExpr 2.0) (VarExpr "x"))) (NumberExpr 0.0)) [increment])
+        state.env state.store) "division by zero");
+    assert "5e: a body error after an earlier successful iteration propagates"
+      (evalErrorIs (execStmt (WhileStmt (BinOpExpr LtOp (VarExpr "x") (NumberExpr 3.0)) [
+        increment, IfStmt (BinOpExpr EqOp (VarExpr "x") (NumberExpr 2.0)) [ExprStmt evalDivZero] None
+      ]) state.env state.store) "division by zero");
+    assert "5e: recheck boolean shape after each iteration"
+      (let withFlag = evalWithBindings [{name = "flag", val = BoolVal true}] in
+       evalErrorIs (execStmt (WhileStmt (VarExpr "flag") [ExprStmt (AssignExpr "flag" (NumberExpr 1.0))])
+         withFlag.env withFlag.store) "while conditional expression is not boolean");
+    assert "condition lookup uses the incoming environment, not body declarations"
+      (evalErrorIs (execStmt (WhileStmt (VarExpr "local") [LetStmt "local" None (BoolExpr false)])
+        initialEnv emptyStore) "unbound variable: local")
+  };
+
+let testEvalStmt: IO Unit =
+  do (bindIO) {
+    testEvalLetStmt;
+    testEvalExprStmt;
+    testEvalBlockStmt;
+    testEvalIfStmt;
+    testEvalWhileStmt;
+    outputLnIO "✅ All passing for execStmt tests"
+  };

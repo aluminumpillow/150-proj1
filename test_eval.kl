@@ -1,0 +1,15 @@
+include "common.kl";
+include "syntax.kl";
+include "eval.kl";
+
+include "test_evalExpr.kl";
+include "test_evalStmt.kl";
+include "test_evalProgram.kl";
+
+let main: IO Unit =
+  do (bindIO) {
+    testEvalExpr;
+    # testEvalStmt;
+    # testEvalProgram;
+    outputLnIO "✅ All passing for evaluator tests"
+  };

@@ -1,0 +1,475 @@
+# Included first by test_eval.kl. Shared helpers also serve the statement and program tests.
+
+# These tests call the evaluator directly, including unchecked ASTs for section 5e.
+# Env and Store contain functions. Inspect bindings and values, not whole results.
+# Compare record fields in source order; inspect closures separately.
+letrec evalValuesEqual left right =
+  letrec fieldsEqual left right =
+    match left, right {
+      [], [] => true;
+      l :: ls, r :: rs =>
+        l.name == r.name && evalValuesEqual l.val r.val && fieldsEqual ls rs;
+      _, _ => false;
+    }
+  in
+    match left, right {
+      NumberVal a, NumberVal b => a == b;
+      BoolVal a, BoolVal b => a == b;
+      StringVal a, StringVal b => a == b;
+      NullVal, NullVal => true;
+      RecordVal a, RecordVal b => fieldsEqual a b;
+      _, _ => false;
+    };
+
+let evalErrorIs result expected =
+  match result {
+    Err actual => actual == expected;
+    Ok _ => false;
+  };
+
+let evalExprValueIs result expected =
+  match result {
+    Ok res => evalValuesEqual res.val expected;
+    Err _ => false;
+  };
+
+let evalBindingIs name expected env store =
+  match lookupEnv name env {
+    Err _ => false;
+    Ok loc =>
+      match lookupStore loc store {
+        Err _ => false;
+        Ok actual => evalValuesEqual actual expected;
+      };
+  };
+
+letrec evalBindingsAre bindings env store =
+  match bindings {
+    [] => true;
+    binding :: rest =>
+      evalBindingIs binding.name binding.val env store &&
+        evalBindingsAre rest env store;
+  };
+
+letrec evalNamesMissing names env =
+  match names {
+    [] => true;
+    name :: rest =>
+      match lookupEnv name env {
+        Ok _ => false;
+        Err _ => evalNamesMissing rest env;
+      };
+  };
+
+let evalStateIs result bindings missing depth =
+  match result {
+    Err _ => false;
+    Ok res =>
+      length res.env == depth &&
+        evalBindingsAre bindings res.env res.store &&
+        evalNamesMissing missing res.env;
+  };
+
+# Set up an environment independently of execStmt and execProgram.
+let evalWithBindings bindings =
+  foldLeft (fn state binding =>
+    let allocated = alloc binding.val state.store in
+      {env = bindEnvLocal binding.name allocated.loc state.env,
+       store = allocated.store})
+    {env = initialEnv, store = emptyStore} bindings;
+
+letrec forEachEvalTest test items =
+  match items {
+    [] => pureIO unit;
+    first :: rest => do (bindIO) {
+      test first;
+      forEachEvalTest test rest
+    };
+  };
+
+let assertEvalExpr label expr expected =
+  assert label (evalExprValueIs (evalExpr expr initialEnv emptyStore) expected);
+
+let assertEvalExprError label expr expected =
+  assert label (evalErrorIs (evalExpr expr initialEnv emptyStore) expected);
+
+let assertEvalProgram label program bindings missing =
+  assert label (evalStateIs (execProgram program) bindings missing 1);
+
+let evalDivZero = BinOpExpr DivOp (NumberExpr 1.0) (NumberExpr 0.0);
+
+# A poison expression used ONLY in positions that must never execute.
+# Self-application diverges if reached; annotations are erased during evaluation.
+# Unlike two ordinary errors, this also catches evaluating a later premise and
+# then discarding its result in favor of an earlier error.
+let evalSelfApply = FnExpr [{name = "self", typ = NumberType}] NumberType
+  (AppExpr (VarExpr "self") [VarExpr "self"]);
+let evalUnreachable = AppExpr evalSelfApply [evalSelfApply];
+
+let testEvalLiterals: IO Unit =
+  do (bindIO) {
+    forEachEvalTest (fn test =>
+      assertEvalExpr test.label test.expr test.expected) [
+      {label = "E-Number: fractional literal", expr = NumberExpr 2.5, expected = NumberVal 2.5},
+      {label = "E-Bool: true", expr = BoolExpr true, expected = BoolVal true},
+      {label = "E-Bool: false", expr = BoolExpr false, expected = BoolVal false},
+      {label = "E-String: decoded contents", expr = StringExpr "a\n\t\"\\", expected = StringVal "a\n\t\"\\"},
+      {label = "E-String: empty", expr = StringExpr "", expected = StringVal ""},
+      {label = "E-Null", expr = NullExpr, expected = NullVal}
+    ];
+    assert "literals preserve existing store entries and do not allocate"
+      (let state = evalWithBindings [{name = "x", val = NumberVal 7.0}] in
+       match evalExpr (NumberExpr 2.5) state.env state.store {
+         Ok res => res.store.nextLoc == state.store.nextLoc &&
+           evalBindingIs "x" (NumberVal 7.0) state.env res.store;
+         Err _ => false;
+       })
+  };
+
+let testEvalVariablesAndAssignment: IO Unit =
+  let state = evalWithBindings [
+    {name = "x", val = NumberVal 1.0}, {name = "y", val = NumberVal 9.0}
+  ] in
+  let inner = alloc (NumberVal 20.0) state.store in
+  let innerEnv = bindEnvLocal "x" inner.loc (pushEnvScope state.env) in
+  do (bindIO) {
+    assert "E-Var: look up an outer variable through an empty scope"
+      (evalExprValueIs (evalExpr (VarExpr "x") (pushEnvScope state.env) state.store) (NumberVal 1.0));
+    assert "E-Var: prefer the innermost location"
+      (evalExprValueIs (evalExpr (VarExpr "x") innerEnv inner.store) (NumberVal 20.0));
+    assertEvalExprError "E-Var: unbound name" (VarExpr "missing") "unbound variable: missing";
+    assert "E-Var: names are case sensitive"
+      (evalErrorIs (evalExpr (VarExpr "X") state.env state.store) "unbound variable: X");
+    assert "E-Var: missing store entry is a lookup error"
+      (evalErrorIs (evalExpr (VarExpr "x") [extendEnvScope emptyEnvScope "x" 0] emptyStore)
+        "unallocated store location");
+    assert "E-Assign: return the assigned value and preserve unrelated entries"
+      (match evalExpr (AssignExpr "x" (NumberExpr 3.0)) state.env state.store {
+        Ok res => evalValuesEqual res.val (NumberVal 3.0) &&
+          evalBindingIs "x" (NumberVal 3.0) state.env res.store &&
+          evalBindingIs "y" (NumberVal 9.0) state.env res.store &&
+          res.store.nextLoc == state.store.nextLoc &&
+          evalBindingIs "x" (NumberVal 1.0) state.env state.store;
+        Err _ => false;
+      });
+    assert "E-Assign: update the innermost binding without changing the outer one"
+      (match evalExpr (AssignExpr "x" (NumberExpr 30.0)) innerEnv inner.store {
+        Ok res => evalBindingIs "x" (NumberVal 30.0) innerEnv res.store &&
+          evalBindingIs "x" (NumberVal 1.0) state.env res.store;
+        Err _ => false;
+      });
+    assert "E-Assign: thread nested assignment effects"
+      (match evalExpr (AssignExpr "x" (AssignExpr "y" (NumberExpr 4.0))) state.env state.store {
+        Ok res => evalValuesEqual res.val (NumberVal 4.0) &&
+          evalBindingsAre [{name = "x", val = NumberVal 4.0}, {name = "y", val = NumberVal 4.0}]
+            state.env res.store;
+        Err _ => false;
+      });
+    assertEvalExprError "5e: assignment checks its target before an erroneous RHS"
+      (AssignExpr "missing" evalDivZero) "unbound variable: missing";
+    assertEvalExprError "5e: assignment never reaches a divergent RHS for a missing target"
+      (AssignExpr "missing" evalUnreachable) "unbound variable: missing";
+    assert "5e: assignment propagates the RHS error unchanged"
+      (evalErrorIs (evalExpr (AssignExpr "x" evalDivZero) state.env state.store) "division by zero")
+  };
+
+let testEvalStrictOperators: IO Unit =
+  do (bindIO) {
+    forEachEvalTest (fn test => assertEvalExpr test.label test.expr test.expected) [
+      {label = "E-Unary: numeric negation", expr = UnaryOpExpr NegOp (NumberExpr 2.5), expected = NumberVal (0.0 -. 2.5)},
+      {label = "E-Unary: not true", expr = UnaryOpExpr NotOp (BoolExpr true), expected = BoolVal false},
+      {label = "E-Unary: not false", expr = UnaryOpExpr NotOp (BoolExpr false), expected = BoolVal true},
+      {label = "E-Binary: add", expr = BinOpExpr AddOp (NumberExpr 2.0) (NumberExpr 3.0), expected = NumberVal 5.0},
+      {label = "E-Binary: subtract", expr = BinOpExpr SubOp (NumberExpr 2.0) (NumberExpr 3.0), expected = NumberVal (0.0 -. 1.0)},
+      {label = "E-Binary: multiply", expr = BinOpExpr MulOp (NumberExpr 2.5) (NumberExpr 4.0), expected = NumberVal 10.0},
+      {label = "E-Binary: fractional division", expr = BinOpExpr DivOp (NumberExpr 5.0) (NumberExpr 2.0), expected = NumberVal 2.5},
+      {label = "E-Binary: decoded string concatenation", expr = BinOpExpr AddOp (StringExpr "a\n") (StringExpr "b"), expected = StringVal "a\nb"},
+      {label = "numeric equality", expr = BinOpExpr EqOp (NumberExpr 2.0) (NumberExpr 2.0), expected = BoolVal true},
+      {label = "numeric inequality", expr = BinOpExpr NeqOp (NumberExpr 2.0) (NumberExpr 3.0), expected = BoolVal true},
+      {label = "boolean equality", expr = BinOpExpr EqOp (BoolExpr true) (BoolExpr false), expected = BoolVal false},
+      {label = "boolean inequality", expr = BinOpExpr NeqOp (BoolExpr false) (BoolExpr false), expected = BoolVal false},
+      {label = "decoded string equality", expr = BinOpExpr EqOp (StringExpr "x\n") (StringExpr "x\n"), expected = BoolVal true},
+      {label = "string inequality", expr = BinOpExpr NeqOp (StringExpr "a") (StringExpr "b"), expected = BoolVal true},
+      {label = "null equality", expr = BinOpExpr EqOp NullExpr NullExpr, expected = BoolVal true},
+      {label = "null inequality", expr = BinOpExpr NeqOp NullExpr NullExpr, expected = BoolVal false}
+    ];
+    forEachEvalTest (fn test => do (bindIO) {
+      assertEvalExpr (str_concat test.label " true")
+        (BinOpExpr test.op (NumberExpr test.a) (NumberExpr test.b)) (BoolVal true);
+      assertEvalExpr (str_concat test.label " false")
+        (BinOpExpr test.op (NumberExpr test.b) (NumberExpr test.a)) (BoolVal false)
+    }) [
+      {label = "less than", op = LtOp, a = 1.0, b = 2.0},
+      {label = "less than or equal", op = LeOp, a = 1.0, b = 2.0},
+      {label = "greater than", op = GtOp, a = 2.0, b = 1.0},
+      {label = "greater than or equal", op = GeOp, a = 2.0, b = 1.0}
+    ];
+    assertEvalExpr "less than excludes equality" (BinOpExpr LtOp (NumberExpr 2.0) (NumberExpr 2.0)) (BoolVal false);
+    assertEvalExpr "greater than excludes equality" (BinOpExpr GtOp (NumberExpr 2.0) (NumberExpr 2.0)) (BoolVal false);
+    assertEvalExpr "less than or equal includes equality" (BinOpExpr LeOp (NumberExpr 2.0) (NumberExpr 2.0)) (BoolVal true);
+    assertEvalExpr "greater than or equal includes equality" (BinOpExpr GeOp (NumberExpr 2.0) (NumberExpr 2.0)) (BoolVal true);
+    assert "E-Binary: RHS sees LHS assignment effects"
+      (let state = evalWithBindings [{name = "x", val = NumberVal 0.0}] in
+       match evalExpr (BinOpExpr AddOp (AssignExpr "x" (NumberExpr 2.0)) (VarExpr "x")) state.env state.store {
+         Ok res => evalValuesEqual res.val (NumberVal 4.0) &&
+           evalBindingIs "x" (NumberVal 2.0) state.env res.store;
+         Err _ => false;
+       });
+    assert "E-Binary: return the store produced by the RHS"
+      (let state = evalWithBindings [{name = "x", val = NumberVal 0.0}] in
+       match evalExpr (BinOpExpr AddOp (AssignExpr "x" (NumberExpr 2.0))
+         (AssignExpr "x" (NumberExpr 3.0))) state.env state.store {
+         Ok res => evalValuesEqual res.val (NumberVal 5.0) &&
+           evalBindingIs "x" (NumberVal 3.0) state.env res.store;
+         Err _ => false;
+       });
+    assert "E-Unary: preserve operand store effects"
+      (let state = evalWithBindings [{name = "x", val = BoolVal false}] in
+       match evalExpr (UnaryOpExpr NotOp (AssignExpr "x" (BoolExpr true))) state.env state.store {
+         Ok res => evalValuesEqual res.val (BoolVal false) &&
+           evalBindingIs "x" (BoolVal true) state.env res.store;
+         Err _ => false;
+       })
+  };
+
+let testEvalOperatorErrors: IO Unit =
+  do (bindIO) {
+    forEachEvalTest (fn test => assertEvalExprError test.label test.expr test.error) [
+      {label = "negation requires a number", expr = UnaryOpExpr NegOp (BoolExpr true), error = "invalid operand for -"},
+      {label = "not requires a boolean", expr = UnaryOpExpr NotOp (NumberExpr 1.0), error = "invalid operand for !"},
+      {label = "no string to number coercion", expr = BinOpExpr AddOp (NumberExpr 1.0) (StringExpr "2"), error = "invalid operands: expected numbers"},
+      {label = "no number to string coercion", expr = BinOpExpr AddOp (StringExpr "1") (NumberExpr 2.0), error = "invalid operands for +"},
+      {label = "division rejects nonnumeric left operand", expr = BinOpExpr DivOp NullExpr (NumberExpr 1.0), error = "invalid operands for /"},
+      {label = "a zero RHS does not make a nonnumeric division valid", expr = BinOpExpr DivOp (BoolExpr true) (NumberExpr 0.0), error = "invalid operands for /"},
+      {label = "division rejects nonnumeric right operand", expr = BinOpExpr DivOp (NumberExpr 1.0) NullExpr, error = "invalid operands for /"},
+      {label = "E-DivZero", expr = evalDivZero, error = "division by zero"},
+      {label = "division by negative zero", expr = BinOpExpr DivOp (NumberExpr 1.0) (NumberExpr (0.0 /. (0.0 -. 1.0))), error = "division by zero"},
+      {label = "equality requires the same primitive type", expr = BinOpExpr EqOp (NumberExpr 1.0) (BoolExpr true), error = "invalid equality"},
+      {label = "inequality requires the same primitive type", expr = BinOpExpr NeqOp NullExpr (StringExpr "null"), error = "invalid equality"},
+      {label = "record equality is forbidden", expr = BinOpExpr EqOp (RecordExpr []) (RecordExpr []), error = "invalid equality"},
+      {label = "function equality is forbidden", expr = BinOpExpr EqOp (FnExpr [] NullType NullExpr) (FnExpr [] NullType NullExpr), error = "invalid equality"},
+      {label = "record inequality is forbidden", expr = BinOpExpr NeqOp (RecordExpr []) (RecordExpr []), error = "invalid equality"},
+      {label = "function inequality is forbidden", expr = BinOpExpr NeqOp (FnExpr [] NullType NullExpr) (FnExpr [] NullType NullExpr), error = "invalid equality"},
+      {label = "unary errors propagate unchanged", expr = UnaryOpExpr NotOp evalDivZero, error = "division by zero"},
+      {label = "strict LHS error precedes RHS error", expr = BinOpExpr AddOp (VarExpr "first") evalDivZero, error = "unbound variable: first"},
+      {label = "division evaluates its LHS before detecting a zero RHS", expr = BinOpExpr DivOp (VarExpr "first") (NumberExpr 0.0), error = "unbound variable: first"},
+      {label = "strict RHS error propagates after a successful LHS", expr = BinOpExpr AddOp (NumberExpr 1.0) (VarExpr "right"), error = "unbound variable: right"},
+      {label = "strict RHS evaluation precedes operand-shape checking", expr = BinOpExpr DivOp (BoolExpr true) (VarExpr "right"), error = "unbound variable: right"},
+      {label = "5e: strict LHS error prevents later evaluation", expr = BinOpExpr AddOp (VarExpr "first") evalUnreachable, error = "unbound variable: first"}
+    ];
+    forEachEvalTest (fn op => do (bindIO) {
+      assertEvalExprError "numeric operator rejects a bad left operand"
+        (BinOpExpr op (StringExpr "1") (NumberExpr 2.0)) "invalid operands: expected numbers";
+      assertEvalExprError "numeric operator rejects a bad right operand"
+        (BinOpExpr op (NumberExpr 1.0) (BoolExpr false)) "invalid operands: expected numbers"
+    }) [SubOp, MulOp, LtOp, LeOp, GtOp, GeOp]
+  };
+
+let testEvalShortCircuit: IO Unit =
+  let state = evalWithBindings [{name = "x", val = BoolVal false}] in
+  do (bindIO) {
+    forEachEvalTest (fn test => assertEvalExpr test.label
+      (BinOpExpr test.op (BoolExpr test.left) (BoolExpr test.right)) (BoolVal test.expected)) [
+      {label = "E-AndFalse false", op = AndOp, left = false, right = false, expected = false},
+      {label = "E-AndFalse true", op = AndOp, left = false, right = true, expected = false},
+      {label = "E-AndTrue false", op = AndOp, left = true, right = false, expected = false},
+      {label = "E-AndTrue true", op = AndOp, left = true, right = true, expected = true},
+      {label = "E-OrTrue false", op = OrOp, left = true, right = false, expected = true},
+      {label = "E-OrTrue true", op = OrOp, left = true, right = true, expected = true},
+      {label = "E-OrFalse false", op = OrOp, left = false, right = false, expected = false},
+      {label = "E-OrFalse true", op = OrOp, left = false, right = true, expected = true}
+    ];
+    forEachEvalTest (fn test => do (bindIO) {
+      assertEvalExpr test.label (BinOpExpr test.op (BoolExpr test.left) evalDivZero) (BoolVal test.left);
+      assertEvalExpr "5e: skipped operand may diverge"
+        (BinOpExpr test.op (BoolExpr test.left) evalUnreachable) (BoolVal test.left);
+      assert "short circuit skips RHS store effects"
+        (match evalExpr (BinOpExpr test.op (BoolExpr test.left) (AssignExpr "x" (BoolExpr true))) state.env state.store {
+          Ok res => evalBindingIs "x" (BoolVal false) state.env res.store && res.store.nextLoc == state.store.nextLoc;
+          Err _ => false;
+        })
+    }) [{label = "false && skips errors", op = AndOp, left = false}, {label = "true || skips errors", op = OrOp, left = true}];
+    forEachEvalTest (fn test =>
+      let state = evalWithBindings [{name = "x", val = BoolVal (not test.left)}] in
+      assert "short circuit preserves LHS effects while skipping RHS"
+        (match evalExpr (BinOpExpr test.op (AssignExpr "x" (BoolExpr test.left)) evalUnreachable)
+          state.env state.store {
+          Ok res => evalValuesEqual res.val (BoolVal test.left) &&
+            evalBindingIs "x" (BoolVal test.left) state.env res.store;
+          Err _ => false;
+        })) [{op = AndOp, left = false}, {op = OrOp, left = true}];
+    forEachEvalTest (fn test => do (bindIO) {
+      assertEvalExprError "5e: logical LHS error skips RHS"
+        (BinOpExpr test.op (VarExpr "first") evalUnreachable) "unbound variable: first";
+      assertEvalExprError "5e: invalid logical LHS skips RHS"
+        (BinOpExpr test.op (NumberExpr 0.0) evalUnreachable) test.leftError;
+      assertEvalExprError "5e: reached logical RHS error propagates"
+        (BinOpExpr test.op (BoolExpr test.left) evalDivZero) "division by zero";
+      assertEvalExprError "logical RHS must be boolean"
+        (BinOpExpr test.op (BoolExpr test.left) NullExpr) test.rightError;
+      assert "logical operators retain effects from both evaluated operands"
+        (match evalExpr (BinOpExpr test.op (AssignExpr "x" (BoolExpr test.left))
+          (AssignExpr "x" (BoolExpr true))) state.env state.store {
+          Ok res => evalValuesEqual res.val (BoolVal true) && evalBindingIs "x" (BoolVal true) state.env res.store;
+          Err _ => false;
+        })
+    }) [
+      {op = AndOp, left = true, leftError = "left operand of && must be a boolean", rightError = "right operand of && must be a boolean"},
+      {op = OrOp, left = false, leftError = "left operand of || must be a boolean", rightError = "right operand of || must be a boolean"}
+    ]
+  };
+
+let testEvalFunctionsAndCalls: IO Unit =
+  let identity = FnExpr [{name = "x", typ = NumberType}] NumberType (VarExpr "x") in
+  let state = evalWithBindings [{name = "x", val = NumberVal 10.0}] in
+  do (bindIO) {
+    assert "E-Fun: capture parameter names, body, and definition environment without evaluating body"
+      (match evalExpr (FnExpr [{name = "p", typ = NumberType}] NumberType evalDivZero) state.env state.store {
+        Ok res => match res.val {
+          ClosureVal params body closureEnv => params == ["p"] && body == evalDivZero &&
+            lookupEnv "x" closureEnv == lookupEnv "x" state.env && res.store.nextLoc == state.store.nextLoc;
+          _ => false;
+        };
+        Err _ => false;
+      });
+    assertEvalExpr "E-App: zero parameters and arguments"
+      (AppExpr (FnExpr [] NumberType (NumberExpr 42.0)) []) (NumberVal 42.0);
+    assertEvalExpr "E-App: identity" (AppExpr identity [NumberExpr 7.0]) (NumberVal 7.0);
+    assertEvalExpr "E-App: parameter and return annotations have no runtime effect"
+      (AppExpr (FnExpr [{name = "x", typ = BoolType}] BoolType (VarExpr "x")) [NumberExpr 7.0])
+      (NumberVal 7.0);
+    assert "arguments all use the caller environment before parameter binding"
+      (evalExprValueIs (evalExpr (AppExpr
+        (FnExpr [{name = "x", typ = NumberType}, {name = "y", typ = NumberType}] NumberType (VarExpr "y"))
+        [NumberExpr 1.0, VarExpr "x"]) state.env state.store) (NumberVal 10.0));
+    assert "callee effects precede arguments, which evaluate left to right"
+      (let calleeFunction = FnExpr [{name = "a", typ = NumberType}, {name = "b", typ = NumberType}] NumberType
+         (BinOpExpr AddOp (VarExpr "a") (VarExpr "b")) in
+       let withF = evalWithBindings [
+         {name = "f", val = ClosureVal [] NullExpr initialEnv}, {name = "x", val = NumberVal 0.0}
+       ] in
+       let callee = FieldExpr (RecordExpr [
+         {name = "effect", expr = AssignExpr "x" (NumberExpr 1.0)},
+         {name = "call", expr = AssignExpr "f" calleeFunction}
+       ]) "call" in
+       match evalExpr (AppExpr callee [
+         AssignExpr "x" (BinOpExpr AddOp (VarExpr "x") (NumberExpr 1.0)), VarExpr "x"
+       ]) withF.env withF.store {
+         Ok res => evalValuesEqual res.val (NumberVal 4.0) &&
+           evalBindingIs "x" (NumberVal 2.0) withF.env res.store;
+         Err _ => false;
+       });
+    assert "argument effects update the current store visible to the captured environment"
+      (evalExprValueIs (evalExpr (AppExpr
+        (FnExpr [{name = "unused", typ = NumberType}] NumberType (VarExpr "x"))
+        [AssignExpr "x" (NumberExpr 20.0)]) state.env state.store) (NumberVal 20.0));
+    assert "parameter assignment updates a fresh location, not the caller variable"
+      (match evalExpr (AppExpr
+        (FnExpr [{name = "x", typ = NumberType}] NumberType
+          (AssignExpr "x" (BinOpExpr AddOp (VarExpr "x") (NumberExpr 1.0))))
+        [VarExpr "x"]) state.env state.store {
+        Ok res => evalValuesEqual res.val (NumberVal 11.0) &&
+          evalBindingIs "x" (NumberVal 10.0) state.env res.store &&
+          res.store.nextLoc == state.store.nextLoc + 1;
+        Err _ => false;
+      });
+    assert "parameters occupy distinct fresh locations retained after return"
+      (match evalExpr (AppExpr
+        (FnExpr [{name = "a", typ = NumberType}, {name = "b", typ = NumberType}]
+          (FunctionType [] NumberType) (FnExpr [] NumberType (VarExpr "a")))
+        [NumberExpr 3.0, NumberExpr 4.0]) state.env state.store {
+        Ok res => match res.val {
+          ClosureVal _ _ closureEnv =>
+            match lookupEnv "a" closureEnv, lookupEnv "b" closureEnv {
+              Ok a, Ok b => a != b &&
+                (match state.store.mem a, state.store.mem b { None, None => true; _, _ => false; }) &&
+                evalBindingIs "a" (NumberVal 3.0) closureEnv res.store &&
+                evalBindingIs "b" (NumberVal 4.0) closureEnv res.store;
+              _, _ => false;
+            };
+          _ => false;
+        };
+        Err _ => false;
+      });
+    assert "all arguments finish allocating before outer parameter allocation"
+      (match evalExpr (AppExpr
+        (FnExpr [{name = "a", typ = NumberType}] (FunctionType [] NumberType)
+          (FnExpr [] NumberType (VarExpr "a")))
+        [AppExpr (FnExpr [{name = "inner", typ = NumberType}] NumberType (VarExpr "inner")) [NumberExpr 7.0]])
+        state.env state.store {
+        Ok res => match res.val {
+          ClosureVal _ _ closureEnv =>
+            match lookupEnv "a" closureEnv {
+              Ok loc => loc == state.store.nextLoc + 1 &&
+                res.store.nextLoc == state.store.nextLoc + 2 &&
+                evalBindingIs "a" (NumberVal 7.0) closureEnv res.store;
+              Err _ => false;
+            };
+          _ => false;
+        };
+        Err _ => false;
+      })
+  };
+
+let testEvalCallErrors: IO Unit =
+  let twoParams = [{name = "a", typ = NumberType}, {name = "b", typ = NumberType}] in
+  do (bindIO) {
+    forEachEvalTest (fn test => assertEvalExprError test.label test.expr test.error) [
+      {label = "callee error precedes argument evaluation", expr = AppExpr (VarExpr "callee") [evalUnreachable], error = "unbound variable: callee"},
+      {label = "callee shape checked before arguments", expr = AppExpr (NumberExpr 1.0) [evalUnreachable], error = "attempted to call a non-function"},
+      {label = "too many arguments checked before arguments", expr = AppExpr (FnExpr [] NumberType evalUnreachable) [evalUnreachable], error = "too many arguments in function call"},
+      {label = "too few arguments checked before arguments", expr = AppExpr (FnExpr twoParams NumberType evalUnreachable) [evalUnreachable], error = "too few arguments in function call"},
+      {label = "nonempty parameter list rejects an empty argument list before the body", expr = AppExpr (FnExpr [{name = "x", typ = NumberType}] NumberType evalUnreachable) [], error = "too few arguments in function call"},
+      {label = "argument list stops at first error", expr = AppExpr (FnExpr twoParams NumberType evalUnreachable) [VarExpr "first", evalUnreachable], error = "unbound variable: first"},
+      {label = "later argument error skips body", expr = AppExpr (FnExpr twoParams NumberType evalUnreachable) [NumberExpr 1.0, evalDivZero], error = "division by zero"},
+      {label = "function body error propagates after arguments", expr = AppExpr (FnExpr twoParams NumberType evalDivZero) [NumberExpr 1.0, NumberExpr 2.0], error = "division by zero"},
+      {label = "nested call propagates unchanged", expr = AppExpr (FnExpr [] NumberType (AppExpr (FnExpr [] NumberType (VarExpr "body")) [])) [], error = "unbound variable: body"}
+    ]
+  };
+
+let testEvalRecordsAndFields: IO Unit =
+  let state = evalWithBindings [{name = "x", val = NumberVal 0.0}] in
+  let increment = AssignExpr "x" (BinOpExpr AddOp (VarExpr "x") (NumberExpr 1.0)) in
+  do (bindIO) {
+    assertEvalExpr "E-Record / E-ListEmpty: empty record" (RecordExpr []) (RecordVal []);
+    assert "E-Record / E-ListCons: field order and effects are left to right"
+      (match evalExpr (RecordExpr [{name = "z", expr = increment}, {name = "a", expr = increment}]) state.env state.store {
+        Ok res => evalValuesEqual res.val (RecordVal [{name = "z", val = NumberVal 1.0}, {name = "a", val = NumberVal 2.0}]) &&
+          evalBindingIs "x" (NumberVal 2.0) state.env res.store;
+        Err _ => false;
+      });
+    assertEvalExpr "E-Field: nested field access"
+      (FieldExpr (FieldExpr (RecordExpr [{name = "inner", expr = RecordExpr [{name = "answer", expr = NumberExpr 42.0}]}]) "inner") "answer")
+      (NumberVal 42.0);
+    assert "E-Field: preserve target expression effects"
+      (match evalExpr (FieldExpr (RecordExpr [{name = "value", expr = increment}]) "value") state.env state.store {
+        Ok res => evalValuesEqual res.val (NumberVal 1.0) && evalBindingIs "x" (NumberVal 1.0) state.env res.store;
+        Err _ => false;
+      });
+    assertEvalExpr "E-Field: call a function stored in a record"
+      (AppExpr (FieldExpr (RecordExpr [{name = "id", expr = FnExpr [{name = "x", typ = NumberType}] NumberType (VarExpr "x")}]) "id") [NumberExpr 8.0])
+      (NumberVal 8.0);
+    assertEvalExprError "record fields stop before a divergent later field"
+      (RecordExpr [{name = "first", expr = VarExpr "first"}, {name = "later", expr = evalUnreachable}]) "unbound variable: first";
+    assertEvalExprError "later field errors propagate after earlier fields succeed"
+      (RecordExpr [{name = "first", expr = NumberExpr 1.0}, {name = "later", expr = evalDivZero}]) "division by zero";
+    assertEvalExprError "field access propagates target errors before lookup"
+      (FieldExpr evalDivZero "missing") "division by zero";
+    assertEvalExprError "field access rejects non-records"
+      (FieldExpr (NumberExpr 1.0) "missing") "field access on a non-record";
+    assertEvalExprError "missing record field"
+      (FieldExpr (RecordExpr [{name = "present", expr = NullExpr}]) "missing") "unknown record field: missing"
+  };
+
+let testEvalExpr: IO Unit =
+  do (bindIO) {
+    testEvalLiterals;
+    testEvalVariablesAndAssignment;
+    testEvalStrictOperators;
+    testEvalOperatorErrors;
+    testEvalShortCircuit;
+    testEvalFunctionsAndCalls;
+    testEvalCallErrors;
+    testEvalRecordsAndFields;
+    outputLnIO "✅ All passing for evalExpr tests"
+  };
