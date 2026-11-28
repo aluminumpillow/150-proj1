@@ -1,0 +1,822 @@
+include "minits.kl";
+
+# Item 1c
+
+# 1c.1 factorial
+let program1 = "
+let n: number = 5;
+let result = 1;
+while (n > 1) {
+  result = result * n;
+  n = n - 1;
+}";
+
+# 1c.2 closure over a mutable counter
+let program2 = "
+let counter = 0;
+let next = (): number => (counter = counter + 1);
+let a = next();
+let b = next();";
+
+# 1c.3 makeAdder
+let program3 = "
+let makeAdder =
+  (n: number): (x: number) => number =>
+    (x: number): number => x + n;
+let addFive = makeAdder(5);
+let result = addFive(10);";
+
+# 1c.4 records and field access
+let program4 = "
+let student = { name: \"Alice\", year: 2026 };
+let name = student.name;
+let nextYear = student.year + 1;";
+
+# Item 6a
+
+# 6a.1 escaping closure
+let escapingClosureProgram = "
+let f = (): number => 0;
+{
+  let x = 41;
+  f = (): number => x + 1;
+}
+let result = f();";
+
+# 6a.2 lexical scope and shadowing
+let shadowingProgram = "
+let x = 10;
+let f = (): number => x;
+{
+  let x = 20;
+  x = x + 1;
+}
+let result = f();";
+
+# 6a.3 passing functions as arguments
+let applyTwiceProgram = "
+let applyTwice = (f: (x: number) => number, x: number): number => f(f(x));
+let increment = (n: number): number => n + 1;
+let result = applyTwice(increment, 10);";
+
+# 6a.4 composition and chained calls
+let compositionProgram = "
+let compose =
+  (f: (x: number) => number, g: (x: number) => number): (x: number) => number =>
+    (x: number): number => f(g(x));
+let double = (x: number): number => x * 2;
+let increment = (x: number): number => x + 1;
+let result = compose(double, increment)(5);";
+
+# 6a.5 independent mutable closure state
+let independentCountersProgram = "
+let makeCounter = (start: number): () => number =>
+  (): number => (start = start + 1);
+let first = makeCounter(0);
+let second = makeCounter(10);
+let a = first();
+let b = first();
+let c = second();
+let d = first();";
+
+# 6a.6 parameter assignment preserves the caller's variable
+let parameterAssignmentProgram = "
+let bump = (x: number): number => (x = x + 1);
+let n = 5;
+let result = bump(n);";
+
+# 6a.7 functions stored in records
+let recordFunctionsProgram = "
+let operations = {
+  square: (x: number): number => x * x,
+  greet: (name: string): string => \"Hello, \" + name
+};
+let result = operations.square(4);
+let message = operations.greet(\"MiniTS\");";
+
+# 6a.8 short-circuit effects
+let shortCircuitProgram = "
+let x = 0;
+let a = false && ((x = 1) === 1);
+let b = true || ((x = 2) === 2);
+let c = true && ((x = x + 3) === 3);
+let d = false || ((x = x + 4) === 7);";
+
+# 6a.9 left-to-right arguments and records
+let evaluationOrderProgram = "
+let x = 0;
+let pair = (a: number, b: number): { first: number; second: number; } =>
+  ({ first: a, second: b });
+let p = pair(x = x + 1, x = x + 1);
+let r = { first: (x = x + 1), second: (x = x + 1) };";
+
+# 6a.10 effects in a false loop condition
+let loopConditionProgram = "
+let x = 0;
+while ((x = x + 1) < 3) {
+}";
+
+# Additional item 6a cases
+
+# 6a extra: empty program
+let emptyProgram = "";
+
+# 6a extra: empty blocks and records, zero-argument function
+let emptyConstructsProgram = "{} let empty: {} = {}; ({}); let make = (): {} => ({}); let result = make();";
+
+# 6a extra: both if branches, omitted else, and skipped loop
+let conditionalBranchesProgram = "
+let x = 0;
+if (true) { x = x + 1; } else { x = 99; }
+if (false) { x = 99; } else { x = x + 2; }
+if (false) { x = 99; }
+while (false) { x = 99; }";
+
+# 6a extra: precedence, left-associative subtraction, and primitives
+let precedenceProgram = "
+let arithmetic = 2 + 3 * 4;
+let subtraction = 10 - 3 - 2;
+let fraction = 7 / 2;
+let negative = -3;
+let inverted = !false;
+let nothing = null;
+let logic = 1 + 2 * 3 === 7 && 3 <= 3 || false;";
+
+# 6a extra: right-associative assignment
+let assignmentProgram = "let a = 0; let b = 0; let result = (a = b = 7);";
+
+# 6a extra: chained postfix operations and parenthesized expressions
+let chainedPostfixProgram = "
+let make = (x: number): { next: (y: number) => { value: number; }; } =>
+  ({ next: (y: number): { value: number; } => ({ value: x + y }) });
+let result = make((1 + 2)).next(4).value;";
+
+# 6a extra: string escapes and concatenation
+let stringEscapesProgram = "let text = \"line\\n\\r\\t\\\"\\\\\" + \"!\";";
+
+# 6a extra: record-type equality with reordered fields
+let reorderedRecordProgram = "let point: { y: number; x: number; } = { x: 1, y: 2 };";
+
+# 6a extra: whitespace, comments, keyword-prefix names, adjacent operators
+let commentsProgram = "
+// leading comment
+let // between grammar elements
+letter: number = (1 + 2);
+let result = letter<=3&&letter!==0;
+// trailing comment
+";
+
+# 6a extra: skipped operands and branches avoid division by zero
+let skippedErrorsProgram = "
+let a = false && (1 / 0 === 0);
+let b = true || (1 / 0 === 0);
+if (false) { 1 / 0; }
+while (false) { 1 / 0; }";
+
+# Item 6b
+
+# 6b.1 assignment type mismatch
+let assignmentTypeErrorProgram = "let x = 10; x = \"hello\";";
+
+# 6b.2 function return type mismatch
+let returnTypeErrorProgram = "let f = (x: number): boolean => x + 1;";
+
+# 6b.3 non-Boolean condition
+let conditionTypeErrorProgram = "if (1) {}";
+
+# 6b.4 duplicate declaration
+let duplicateDeclarationProgram = "let x = 1; let x = 2;";
+
+# 6b.5 function argument type mismatch
+let argumentTypeErrorProgram = "let f = (x: number): number => x; let result = f(true);";
+
+# 6b.6 extra record field
+let recordTypeErrorProgram = "let p: { x: number; } = { x: 1, y: 2 };";
+
+# Rejected syntax
+
+# 6a rejected syntax: split operator
+let splitOperatorProgram = "let x = 1 = = = 1;";
+
+# 6a rejected syntax: invalid character
+let invalidCharacterProgram = "let x = 1; @";
+
+# 6a rejected syntax: unknown string escape
+let unknownEscapeProgram = "let text = \"bad\\q\";";
+
+# 6a rejected syntax: unescaped newline
+let newlineInStringProgram = "let text = \"line\nbreak\";";
+
+# 6a rejected syntax: unterminated string
+let unterminatedStringProgram = "let text = \"unfinished;";
+
+# 6a rejected syntax: trailing non-comment text
+let trailingTextProgram = "let x = 1; trailing";
+
+# Runtime errors and stage order
+
+# 6 runtime failure: division by zero
+let divisionByZeroProgram = "let result = 1 / 0;";
+
+# 6 pipeline: check an unreachable branch
+let unreachableTypeErrorProgram = "if (false) { let x: number = true; }";
+
+# 6 pipeline: type-check before a division by zero can execute
+let typeErrorBeforeRuntimeProgram = "let x = 1 / 0; let x = 2;";
+
+# Stop if a program that should succeed returns an error.
+let stopOnError error =
+  do (bindIO) {
+    outputLnIO (str_concat "❌ Unexpected error: " (show error));
+    exit 1
+  };
+
+# Run each program and check its globals or expected error directly.
+let main: IO Unit =
+  do (bindIO) {
+
+    # Item 1c
+    outputLnIO "Running 1c.1 factorial";
+    match run program1 {
+      Err error => stopOnError error;
+      Ok execution =>
+        let n = getGlobal execution "n" in
+        let result = getGlobal execution "result" in
+        do (bindIO) {
+          outputLnIO (str_concat "  n = " (show n));
+          assert "n" (n == Some (NumberVal 1.0));
+          outputLnIO (str_concat "  result = " (show result));
+          assert "result" (result == Some (NumberVal 120.0))
+        };
+    };
+    outputLnIO "✅ PASS: 1c.1 factorial";
+
+    outputLnIO "Running 1c.2 closure over a mutable counter";
+    match run program2 {
+      Err error => stopOnError error;
+      Ok execution =>
+        let counter = getGlobal execution "counter" in
+        let a = getGlobal execution "a" in
+        let b = getGlobal execution "b" in
+        do (bindIO) {
+          outputLnIO (str_concat "  counter = " (show counter));
+          assert "counter" (counter == Some (NumberVal 2.0));
+          outputLnIO (str_concat "  a = " (show a));
+          assert "a" (a == Some (NumberVal 1.0));
+          outputLnIO (str_concat "  b = " (show b));
+          assert "b" (b == Some (NumberVal 2.0))
+        };
+    };
+    outputLnIO "✅ PASS: 1c.2 closure over a mutable counter";
+
+    outputLnIO "Running 1c.3 makeAdder";
+    match run program3 {
+      Err error => stopOnError error;
+      Ok execution =>
+        let result = getGlobal execution "result" in
+        let n = getGlobal execution "n" in
+        let x = getGlobal execution "x" in
+        do (bindIO) {
+          outputLnIO (str_concat "  result = " (show result));
+          assert "result" (result == Some (NumberVal 15.0));
+          assert "n is not a global" (n == None);
+          assert "x is not a global" (x == None)
+        };
+    };
+    outputLnIO "✅ PASS: 1c.3 makeAdder";
+
+    outputLnIO "Running 1c.4 records and field access";
+    match run program4 {
+      Err error => stopOnError error;
+      Ok execution =>
+        let student = getGlobal execution "student" in
+        let name = getGlobal execution "name" in
+        let nextYear = getGlobal execution "nextYear" in
+        do (bindIO) {
+          outputLnIO (str_concat "  student = " (show student));
+          assert "student" (student == Some (RecordVal [
+            {name = "name", val = StringVal "Alice"},
+            {name = "year", val = NumberVal 2026.0}
+          ]));
+          outputLnIO (str_concat "  name = " (show name));
+          assert "name" (name == Some (StringVal "Alice"));
+          outputLnIO (str_concat "  nextYear = " (show nextYear));
+          assert "nextYear" (nextYear == Some (NumberVal 2027.0))
+        };
+    };
+    outputLnIO "✅ PASS: 1c.4 records and field access";
+
+
+    # Item 6a
+    outputLnIO "Running 6a.1 escaping closure";
+    match run escapingClosureProgram {
+      Err error => stopOnError error;
+      Ok execution =>
+        let result = getGlobal execution "result" in
+        let x = getGlobal execution "x" in
+        do (bindIO) {
+          outputLnIO (str_concat "  result = " (show result));
+          assert "result" (result == Some (NumberVal 42.0));
+          assert "x is not a global" (x == None)
+        };
+    };
+    outputLnIO "✅ PASS: 6a.1 escaping closure";
+
+    outputLnIO "Running 6a.2 lexical scope and shadowing";
+    match run shadowingProgram {
+      Err error => stopOnError error;
+      Ok execution =>
+        let x = getGlobal execution "x" in
+        let result = getGlobal execution "result" in
+        do (bindIO) {
+          outputLnIO (str_concat "  x = " (show x));
+          assert "x" (x == Some (NumberVal 10.0));
+          outputLnIO (str_concat "  result = " (show result));
+          assert "result" (result == Some (NumberVal 10.0))
+        };
+    };
+    outputLnIO "✅ PASS: 6a.2 lexical scope and shadowing";
+
+    outputLnIO "Running 6a.3 passing functions as arguments";
+    match run applyTwiceProgram {
+      Err error => stopOnError error;
+      Ok execution =>
+        let result = getGlobal execution "result" in
+        let f = getGlobal execution "f" in
+        let x = getGlobal execution "x" in
+        let n = getGlobal execution "n" in
+        do (bindIO) {
+          outputLnIO (str_concat "  result = " (show result));
+          assert "result" (result == Some (NumberVal 12.0));
+          assert "f is not a global" (f == None);
+          assert "x is not a global" (x == None);
+          assert "n is not a global" (n == None)
+        };
+    };
+    outputLnIO "✅ PASS: 6a.3 passing functions as arguments";
+
+    outputLnIO "Running 6a.4 composition and chained calls";
+    match run compositionProgram {
+      Err error => stopOnError error;
+      Ok execution =>
+        let result = getGlobal execution "result" in
+        let f = getGlobal execution "f" in
+        let g = getGlobal execution "g" in
+        let x = getGlobal execution "x" in
+        do (bindIO) {
+          outputLnIO (str_concat "  result = " (show result));
+          assert "result" (result == Some (NumberVal 12.0));
+          assert "f is not a global" (f == None);
+          assert "g is not a global" (g == None);
+          assert "x is not a global" (x == None)
+        };
+    };
+    outputLnIO "✅ PASS: 6a.4 composition and chained calls";
+
+    outputLnIO "Running 6a.5 independent mutable closure state";
+    match run independentCountersProgram {
+      Err error => stopOnError error;
+      Ok execution =>
+        let a = getGlobal execution "a" in
+        let b = getGlobal execution "b" in
+        let c = getGlobal execution "c" in
+        let d = getGlobal execution "d" in
+        let start = getGlobal execution "start" in
+        do (bindIO) {
+          outputLnIO (str_concat "  a = " (show a));
+          assert "a" (a == Some (NumberVal 1.0));
+          outputLnIO (str_concat "  b = " (show b));
+          assert "b" (b == Some (NumberVal 2.0));
+          outputLnIO (str_concat "  c = " (show c));
+          assert "c" (c == Some (NumberVal 11.0));
+          outputLnIO (str_concat "  d = " (show d));
+          assert "d" (d == Some (NumberVal 3.0));
+          assert "start is not a global" (start == None)
+        };
+    };
+    outputLnIO "✅ PASS: 6a.5 independent mutable closure state";
+
+    outputLnIO "Running 6a.6 parameter assignment preserves the caller's variable";
+    match run parameterAssignmentProgram {
+      Err error => stopOnError error;
+      Ok execution =>
+        let n = getGlobal execution "n" in
+        let result = getGlobal execution "result" in
+        let x = getGlobal execution "x" in
+        do (bindIO) {
+          outputLnIO (str_concat "  n = " (show n));
+          assert "n" (n == Some (NumberVal 5.0));
+          outputLnIO (str_concat "  result = " (show result));
+          assert "result" (result == Some (NumberVal 6.0));
+          assert "x is not a global" (x == None)
+        };
+    };
+    outputLnIO "✅ PASS: 6a.6 parameter assignment preserves the caller's variable";
+
+    outputLnIO "Running 6a.7 functions stored in records";
+    match run recordFunctionsProgram {
+      Err error => stopOnError error;
+      Ok execution =>
+        let result = getGlobal execution "result" in
+        let message = getGlobal execution "message" in
+        let x = getGlobal execution "x" in
+        let name = getGlobal execution "name" in
+        do (bindIO) {
+          outputLnIO (str_concat "  result = " (show result));
+          assert "result" (result == Some (NumberVal 16.0));
+          outputLnIO (str_concat "  message = " (show message));
+          assert "message" (message == Some (StringVal "Hello, MiniTS"));
+          assert "x is not a global" (x == None);
+          assert "name is not a global" (name == None)
+        };
+    };
+    outputLnIO "✅ PASS: 6a.7 functions stored in records";
+
+    outputLnIO "Running 6a.8 short-circuit effects";
+    match run shortCircuitProgram {
+      Err error => stopOnError error;
+      Ok execution =>
+        let x = getGlobal execution "x" in
+        let a = getGlobal execution "a" in
+        let b = getGlobal execution "b" in
+        let c = getGlobal execution "c" in
+        let d = getGlobal execution "d" in
+        do (bindIO) {
+          outputLnIO (str_concat "  x = " (show x));
+          assert "x" (x == Some (NumberVal 7.0));
+          outputLnIO (str_concat "  a = " (show a));
+          assert "a" (a == Some (BoolVal false));
+          outputLnIO (str_concat "  b = " (show b));
+          assert "b" (b == Some (BoolVal true));
+          outputLnIO (str_concat "  c = " (show c));
+          assert "c" (c == Some (BoolVal true));
+          outputLnIO (str_concat "  d = " (show d));
+          assert "d" (d == Some (BoolVal true))
+        };
+    };
+    outputLnIO "✅ PASS: 6a.8 short-circuit effects";
+
+    outputLnIO "Running 6a.9 left-to-right arguments and records";
+    match run evaluationOrderProgram {
+      Err error => stopOnError error;
+      Ok execution =>
+        let p = getGlobal execution "p" in
+        let r = getGlobal execution "r" in
+        let x = getGlobal execution "x" in
+        let a = getGlobal execution "a" in
+        let b = getGlobal execution "b" in
+        do (bindIO) {
+          outputLnIO (str_concat "  p = " (show p));
+          assert "p" (p == Some (RecordVal [
+            {name = "first", val = NumberVal 1.0},
+            {name = "second", val = NumberVal 2.0}
+          ]));
+          outputLnIO (str_concat "  r = " (show r));
+          assert "r" (r == Some (RecordVal [
+            {name = "first", val = NumberVal 3.0},
+            {name = "second", val = NumberVal 4.0}
+          ]));
+          outputLnIO (str_concat "  x = " (show x));
+          assert "x" (x == Some (NumberVal 4.0));
+          assert "a is not a global" (a == None);
+          assert "b is not a global" (b == None)
+        };
+    };
+    outputLnIO "✅ PASS: 6a.9 left-to-right arguments and records";
+
+    outputLnIO "Running 6a.10 effects in a false loop condition";
+    match run loopConditionProgram {
+      Err error => stopOnError error;
+      Ok execution =>
+        let x = getGlobal execution "x" in
+        do (bindIO) {
+          outputLnIO (str_concat "  x = " (show x));
+          assert "x" (x == Some (NumberVal 3.0))
+        };
+    };
+    outputLnIO "✅ PASS: 6a.10 effects in a false loop condition";
+
+
+    # Additional item 6a cases
+    outputLnIO "Running 6a extra: empty program";
+    match run emptyProgram {
+      Err error => stopOnError error;
+      Ok execution =>
+        let missing = getGlobal execution "missing" in
+        do (bindIO) {
+          assert "missing is not a global" (missing == None)
+        };
+    };
+    outputLnIO "✅ PASS: 6a extra: empty program";
+
+    outputLnIO "Running 6a extra: empty blocks and records, zero-argument function";
+    match run emptyConstructsProgram {
+      Err error => stopOnError error;
+      Ok execution =>
+        let empty = getGlobal execution "empty" in
+        let result = getGlobal execution "result" in
+        do (bindIO) {
+          outputLnIO (str_concat "  empty = " (show empty));
+          assert "empty" (empty == Some (RecordVal []));
+          outputLnIO (str_concat "  result = " (show result));
+          assert "result" (result == Some (RecordVal []))
+        };
+    };
+    outputLnIO "✅ PASS: 6a extra: empty blocks and records, zero-argument function";
+
+    outputLnIO "Running 6a extra: both if branches, omitted else, and skipped loop";
+    match run conditionalBranchesProgram {
+      Err error => stopOnError error;
+      Ok execution =>
+        let x = getGlobal execution "x" in
+        do (bindIO) {
+          outputLnIO (str_concat "  x = " (show x));
+          assert "x" (x == Some (NumberVal 3.0))
+        };
+    };
+    outputLnIO "✅ PASS: 6a extra: both if branches, omitted else, and skipped loop";
+
+    outputLnIO "Running 6a extra: precedence, left-associative subtraction, and primitives";
+    match run precedenceProgram {
+      Err error => stopOnError error;
+      Ok execution =>
+        let arithmetic = getGlobal execution "arithmetic" in
+        let subtraction = getGlobal execution "subtraction" in
+        let fraction = getGlobal execution "fraction" in
+        let negative = getGlobal execution "negative" in
+        let inverted = getGlobal execution "inverted" in
+        let nothing = getGlobal execution "nothing" in
+        let logic = getGlobal execution "logic" in
+        do (bindIO) {
+          outputLnIO (str_concat "  arithmetic = " (show arithmetic));
+          assert "arithmetic" (arithmetic == Some (NumberVal 14.0));
+          outputLnIO (str_concat "  subtraction = " (show subtraction));
+          assert "subtraction" (subtraction == Some (NumberVal 5.0));
+          outputLnIO (str_concat "  fraction = " (show fraction));
+          assert "fraction" (fraction == Some (NumberVal 3.5));
+          outputLnIO (str_concat "  negative = " (show negative));
+          assert "negative" (negative == Some (NumberVal (-3.0)));
+          outputLnIO (str_concat "  inverted = " (show inverted));
+          assert "inverted" (inverted == Some (BoolVal true));
+          outputLnIO (str_concat "  nothing = " (show nothing));
+          assert "nothing" (nothing == Some (NullVal));
+          outputLnIO (str_concat "  logic = " (show logic));
+          assert "logic" (logic == Some (BoolVal true))
+        };
+    };
+    outputLnIO "✅ PASS: 6a extra: precedence, left-associative subtraction, and primitives";
+
+    outputLnIO "Running 6a extra: right-associative assignment";
+    match run assignmentProgram {
+      Err error => stopOnError error;
+      Ok execution =>
+        let a = getGlobal execution "a" in
+        let b = getGlobal execution "b" in
+        let result = getGlobal execution "result" in
+        do (bindIO) {
+          outputLnIO (str_concat "  a = " (show a));
+          assert "a" (a == Some (NumberVal 7.0));
+          outputLnIO (str_concat "  b = " (show b));
+          assert "b" (b == Some (NumberVal 7.0));
+          outputLnIO (str_concat "  result = " (show result));
+          assert "result" (result == Some (NumberVal 7.0))
+        };
+    };
+    outputLnIO "✅ PASS: 6a extra: right-associative assignment";
+
+    outputLnIO "Running 6a extra: chained postfix operations and parenthesized expressions";
+    match run chainedPostfixProgram {
+      Err error => stopOnError error;
+      Ok execution =>
+        let result = getGlobal execution "result" in
+        let x = getGlobal execution "x" in
+        let y = getGlobal execution "y" in
+        do (bindIO) {
+          outputLnIO (str_concat "  result = " (show result));
+          assert "result" (result == Some (NumberVal 7.0));
+          assert "x is not a global" (x == None);
+          assert "y is not a global" (y == None)
+        };
+    };
+    outputLnIO "✅ PASS: 6a extra: chained postfix operations and parenthesized expressions";
+
+    outputLnIO "Running 6a extra: string escapes and concatenation";
+    match run stringEscapesProgram {
+      Err error => stopOnError error;
+      Ok execution =>
+        let text = getGlobal execution "text" in
+        do (bindIO) {
+          outputLnIO (str_concat "  text = " (show text));
+          assert "text" (text == Some (StringVal "line\n\r\t\"\\!"))
+        };
+    };
+    outputLnIO "✅ PASS: 6a extra: string escapes and concatenation";
+
+    outputLnIO "Running 6a extra: record-type equality with reordered fields";
+    match run reorderedRecordProgram {
+      Err error => stopOnError error;
+      Ok execution =>
+        let point = getGlobal execution "point" in
+        do (bindIO) {
+          outputLnIO (str_concat "  point = " (show point));
+          assert "point" (point == Some (RecordVal [
+            {name = "x", val = NumberVal 1.0},
+            {name = "y", val = NumberVal 2.0}
+          ]))
+        };
+    };
+    outputLnIO "✅ PASS: 6a extra: record-type equality with reordered fields";
+
+    outputLnIO "Running 6a extra: whitespace, comments, keyword-prefix names, adjacent operators";
+    match run commentsProgram {
+      Err error => stopOnError error;
+      Ok execution =>
+        let letter = getGlobal execution "letter" in
+        let result = getGlobal execution "result" in
+        do (bindIO) {
+          outputLnIO (str_concat "  letter = " (show letter));
+          assert "letter" (letter == Some (NumberVal 3.0));
+          outputLnIO (str_concat "  result = " (show result));
+          assert "result" (result == Some (BoolVal true))
+        };
+    };
+    outputLnIO "✅ PASS: 6a extra: whitespace, comments, keyword-prefix names, adjacent operators";
+
+    outputLnIO "Running 6a extra: skipped operands and branches avoid division by zero";
+    match run skippedErrorsProgram {
+      Err error => stopOnError error;
+      Ok execution =>
+        let a = getGlobal execution "a" in
+        let b = getGlobal execution "b" in
+        do (bindIO) {
+          outputLnIO (str_concat "  a = " (show a));
+          assert "a" (a == Some (BoolVal false));
+          outputLnIO (str_concat "  b = " (show b));
+          assert "b" (b == Some (BoolVal true))
+        };
+    };
+    outputLnIO "✅ PASS: 6a extra: skipped operands and branches avoid division by zero";
+
+
+    # Item 6b
+    outputLnIO "Running 6b.1 assignment type mismatch";
+    match run assignmentTypeErrorProgram {
+      Ok _ => assert "expected rejection" false;
+      Err error =>
+        do (bindIO) {
+          outputLnIO (show error);
+          assert "expected error" (error == TypeFailure "assignment type mismatch")
+        };
+    };
+    outputLnIO "✅ PASS: 6b.1 assignment type mismatch";
+
+    outputLnIO "Running 6b.2 function return type mismatch";
+    match run returnTypeErrorProgram {
+      Ok _ => assert "expected rejection" false;
+      Err error =>
+        do (bindIO) {
+          outputLnIO (show error);
+          assert "expected error" (error == TypeFailure "expected boolean, got number")
+        };
+    };
+    outputLnIO "✅ PASS: 6b.2 function return type mismatch";
+
+    outputLnIO "Running 6b.3 non-Boolean condition";
+    match run conditionTypeErrorProgram {
+      Ok _ => assert "expected rejection" false;
+      Err error =>
+        do (bindIO) {
+          outputLnIO (show error);
+          assert "expected error" (error == TypeFailure "expected boolean, got number")
+        };
+    };
+    outputLnIO "✅ PASS: 6b.3 non-Boolean condition";
+
+    outputLnIO "Running 6b.4 duplicate declaration";
+    match run duplicateDeclarationProgram {
+      Ok _ => assert "expected rejection" false;
+      Err error =>
+        do (bindIO) {
+          outputLnIO (show error);
+          assert "expected error" (error == TypeFailure "duplicate declaration: x")
+        };
+    };
+    outputLnIO "✅ PASS: 6b.4 duplicate declaration";
+
+    outputLnIO "Running 6b.5 function argument type mismatch";
+    match run argumentTypeErrorProgram {
+      Ok _ => assert "expected rejection" false;
+      Err error =>
+        do (bindIO) {
+          outputLnIO (show error);
+          assert "expected error" (error == TypeFailure "expected number, got boolean")
+        };
+    };
+    outputLnIO "✅ PASS: 6b.5 function argument type mismatch";
+
+    outputLnIO "Running 6b.6 extra record field";
+    match run recordTypeErrorProgram {
+      Ok _ => assert "expected rejection" false;
+      Err error =>
+        do (bindIO) {
+          outputLnIO (show error);
+          assert "expected error" (error == TypeFailure "expected {x: number}, got {x: number, y: number}")
+        };
+    };
+    outputLnIO "✅ PASS: 6b.6 extra record field";
+
+
+    # Rejected syntax
+    outputLnIO "Running 6a rejected syntax: split operator";
+    match run splitOperatorProgram {
+      Ok _ => assert "expected a parse failure" false;
+      Err (ParseFailure error) => outputLnIO (show error);
+      Err error => stopOnError error;
+    };
+    outputLnIO "✅ PASS: 6a rejected syntax: split operator";
+
+    outputLnIO "Running 6a rejected syntax: invalid character";
+    match run invalidCharacterProgram {
+      Ok _ => assert "expected a parse failure" false;
+      Err (ParseFailure error) =>
+        do (bindIO) {
+          outputLnIO (show error);
+          assert "parse error position" (error.index == 11)
+        };
+      Err error => stopOnError error;
+    };
+    outputLnIO "✅ PASS: 6a rejected syntax: invalid character";
+
+    outputLnIO "Running 6a rejected syntax: unknown string escape";
+    match run unknownEscapeProgram {
+      Ok _ => assert "expected a parse failure" false;
+      Err (ParseFailure error) => outputLnIO (show error);
+      Err error => stopOnError error;
+    };
+    outputLnIO "✅ PASS: 6a rejected syntax: unknown string escape";
+
+    outputLnIO "Running 6a rejected syntax: unescaped newline";
+    match run newlineInStringProgram {
+      Ok _ => assert "expected a parse failure" false;
+      Err (ParseFailure error) => outputLnIO (show error);
+      Err error => stopOnError error;
+    };
+    outputLnIO "✅ PASS: 6a rejected syntax: unescaped newline";
+
+    outputLnIO "Running 6a rejected syntax: unterminated string";
+    match run unterminatedStringProgram {
+      Ok _ => assert "expected a parse failure" false;
+      Err (ParseFailure error) => outputLnIO (show error);
+      Err error => stopOnError error;
+    };
+    outputLnIO "✅ PASS: 6a rejected syntax: unterminated string";
+
+    outputLnIO "Running 6a rejected syntax: trailing non-comment text";
+    match run trailingTextProgram {
+      Ok _ => assert "expected a parse failure" false;
+      Err (ParseFailure error) =>
+        do (bindIO) {
+          outputLnIO (show error);
+          assert "parse error position" (error.index == 11)
+        };
+      Err error => stopOnError error;
+    };
+    outputLnIO "✅ PASS: 6a rejected syntax: trailing non-comment text";
+
+
+    # Runtime errors and stage order
+    outputLnIO "Running 6 runtime failure: division by zero";
+    match run divisionByZeroProgram {
+      Ok _ => assert "expected rejection" false;
+      Err error =>
+        do (bindIO) {
+          outputLnIO (show error);
+          assert "expected error" (error == RuntimeFailure "division by zero")
+        };
+    };
+    outputLnIO "✅ PASS: 6 runtime failure: division by zero";
+
+    outputLnIO "Running 6 pipeline: check an unreachable branch";
+    match run unreachableTypeErrorProgram {
+      Ok _ => assert "expected rejection" false;
+      Err error =>
+        do (bindIO) {
+          outputLnIO (show error);
+          assert "expected error" (error == TypeFailure "expected number, got boolean")
+        };
+    };
+    outputLnIO "✅ PASS: 6 pipeline: check an unreachable branch";
+
+    outputLnIO "Running 6 pipeline: type-check before a division by zero can execute";
+    match run typeErrorBeforeRuntimeProgram {
+      Ok _ => assert "expected rejection" false;
+      Err error =>
+        do (bindIO) {
+          outputLnIO (show error);
+          assert "expected error" (error == TypeFailure "duplicate declaration: x")
+        };
+    };
+    outputLnIO "✅ PASS: 6 pipeline: type-check before a division by zero can execute";
+
+    outputLnIO "✅ All 39 MiniTS public-interface examples passed"
+  };

@@ -1,0 +1,32 @@
+include "parser.kl";
+include "checker.kl";
+include "eval.kl";
+
+type Error
+  = ParseFailure ParseError
+  | TypeFailure String
+  | RuntimeFailure RuntimeError;
+
+# run ::  String -> Result Execution Error
+let run source =
+  match parse source {
+    Err err => Err (ParseFailure err);
+
+    Ok program =>
+      match checkProgram program {
+        Err err => Err (TypeFailure err);
+
+        Ok _ =>
+          match execProgram program {
+            Err err => Err (RuntimeFailure err);
+            Ok execution => Ok execution;
+          };
+      };
+  };
+
+# getGlobal :: Execution -> String -> Option Value
+let getGlobal execution name =
+  match lookupEnv name execution.env {
+    Err _ => None;
+    Ok loc => execution.store.mem loc;
+  };
